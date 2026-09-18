@@ -2,6 +2,8 @@
 
 Source: *Dream-RSI: Recursive Self-Improvement through Evolving Worlds*, Zheng et al., [arXiv:2609.14858](https://arxiv.org/abs/2609.14858). The authors' code is **not released** as of this writing; their GitHub repo carries the paper, assets, and a "coming soon" release plan only. Everything below is read off the paper.
 
+**The paper itself is in this repo**: [`paper/Dream-RSI.pdf`](paper/) (authoritative) alongside a grep-able text extraction. This file is a summary and a mapping onto modules — it is not a substitute. When an issue turns on a detail, open the PDF. See [`paper/README.md`](paper/README.md) for how to navigate between the two.
+
 ## Discovery tree node
 
 Each non-root node `v` preserves:

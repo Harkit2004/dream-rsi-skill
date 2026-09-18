@@ -8,6 +8,8 @@ This file only adds the Claude-Code-specific bits.
 
 Start with [`references/method.md`](references/method.md) — it maps the paper's method onto this codebase's modules. Don't infer the design from the code alone; the code is incomplete by design and the issues describe what's missing.
 
+The paper is vendored at [`references/paper/`](references/paper/): the PDF is authoritative, and `Dream-RSI-fulltext.md` next to it is a text extraction for grepping. **Read the PDF whenever an issue turns on a specific detail** — an equation, a threshold, an experimental setup. `method.md` is a summary written by someone who could be wrong; the PDF is how you check. The text dump has no math in it at all, so never take an equation from there.
+
 ## Where things live
 
 - `src/dream_rsi/tree.py` — node + tree schema, persistence. Everything depends on this; change it carefully.

@@ -40,7 +40,8 @@ grep -rn "PAPER-GAP:" src/ tests/
 | Path | What |
 |---|---|
 | `SKILL.md` | Skill entry point (triggers, workflow) |
-| `references/` | Paper → implementation mapping, loaded on demand |
+| `references/method.md` | Paper → implementation mapping, loaded on demand |
+| `references/paper/` | The paper itself — PDF (authoritative) plus a grep-able text extraction |
 | `src/dream_rsi/` | The implementation |
 | `tests/` | Fixtures and tests (written before implementation — see AGENTS.md) |
 
