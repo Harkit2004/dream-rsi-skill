@@ -67,7 +67,9 @@ BUDGET = 6
 MALFORMED = "malformed"
 OUT_OF_RANGE = "out_of_range"
 
-_PLAN = re.compile(r"^PLAN\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*$", re.MULTILINE)
+# Signed, so that a plan off the grid below is read and then rejected on the
+# grid check rather than being mistaken for an artifact with no plan in it.
+_PLAN = re.compile(r"^PLAN\s*=\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)\s*$", re.MULTILINE)
 
 
 def plan_source(width: int, depth: int) -> str:
@@ -95,7 +97,7 @@ class ToySearchEvaluator:
             )
 
         width, depth = int(match.group(1)), int(match.group(2))
-        if width >= GRID or depth >= GRID:
+        if not 0 <= width < GRID or not 0 <= depth < GRID:
             return EvalResult.failed(
                 f"plan ({width}, {depth}) is off the {GRID}x{GRID} grid",
                 fail_class=OUT_OF_RANGE,

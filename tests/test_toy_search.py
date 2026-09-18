@@ -65,6 +65,10 @@ def test_landscape_is_rugged_rather_than_a_gradient() -> None:
         (plan_source(4, 4), True, False, 0.0, None),
         ("# thought about it, wrote nothing\n", False, False, None, MALFORMED),
         (plan_source(GRID, 0), False, False, None, OUT_OF_RANGE),
+        # Off the grid the other way: a plan the evaluator can read perfectly
+        # well, so it is out of range rather than unreadable.
+        (plan_source(-1, 0), False, False, None, OUT_OF_RANGE),
+        (plan_source(0, -1), False, False, None, OUT_OF_RANGE),
     ],
 )
 def test_evaluator_classifies_plans(

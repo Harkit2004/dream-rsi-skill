@@ -64,6 +64,7 @@ class ScriptedPolicy:
     _index: int = field(default=0, init=False)
 
     def select(self, tree: DiscoveryTree, eligible: Sequence[str], width: int) -> Sequence[str]:
+        """Select this round's scripted positions, or nothing once the script runs out."""
         if self._index >= len(self.rounds):
             return ()
         positions = self.rounds[self._index]
@@ -168,6 +169,7 @@ def record(recording: Recording, destination: Path) -> Path:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Record every fixture into the destination directory, and say what landed where."""
     parser = argparse.ArgumentParser(description="Record the committed discovery tree fixtures.")
     parser.add_argument(
         "destination",
