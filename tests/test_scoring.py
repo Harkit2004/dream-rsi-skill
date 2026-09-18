@@ -123,6 +123,12 @@ def test_weights_reject_negative_coefficients(cost: float, parallelism: float) -
         (1.0, 0, -1),
         (math.nan, 1, 1),
         (math.inf, 1, 1),
+        (1.0, math.nan, 1),
+        (1.0, 1, math.nan),
+        (1.0, 1, math.inf),
+        (1.0, 2.5, 1),
+        (1.0, 1, 1.5),
+        (1.0, True, 1),
     ],
 )
 def test_rejects_counts_and_attainment_that_cannot_be_scored(
@@ -130,9 +136,11 @@ def test_rejects_counts_and_attainment_that_cannot_be_scored(
 ) -> None:
     """Nonsense in is not a number out.
 
-    A NaN attainment would compare false against every rival and so neither win
-    nor lose a version selection, and a negative count would turn the cost term
-    into a reward.
+    A NaN anywhere — attainment or either count — would compare false against
+    every rival and so neither win nor lose a version selection; a negative
+    count would turn the cost term into a reward; and a fractional or infinite
+    count, or a bool standing in for one, describes a replay that cannot have
+    happened, which is worth an error rather than a score.
     """
     with pytest.raises(ValueError):
         replay_score(attainment, revealed=revealed, rounds=rounds)

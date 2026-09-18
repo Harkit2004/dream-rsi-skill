@@ -96,6 +96,21 @@ DEFAULT_COST_SWEEP = (0.0, 0.005, 0.01, 0.02, 0.04)
 DEFAULT_PARALLELISM_SWEEP = (0.0, 0.0025, 0.005, 0.01, 0.02)
 
 
+def _check_count(name: str, value: int) -> None:
+    """Reject anything that is not a count of things that happened in a replay.
+
+    ``N_i^m`` and ``k_i^{m,★}`` are cardinalities, so only a nonnegative integer
+    describes a replay that could have run. A NaN would carry through the
+    arithmetic and make the whole score NaN — which compares false against
+    every rival, so the version neither wins nor loses a selection — an
+    infinity would silently zero the parallelism term, a fraction counts
+    attempts that cannot exist, and a bool is a caller mistake that would
+    otherwise score as one node.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a count >= 0, got {value!r}")
+
+
 def replay_score(
     attainment: float | None,
     *,
@@ -122,10 +137,8 @@ def replay_score(
     lower-is-better task. Revisit if the authors' implementation lands (see
     references/method.md).
     """
-    if revealed < 0:
-        raise ValueError(f"revealed must be a count >= 0, got {revealed!r}")
-    if rounds < 0:
-        raise ValueError(f"rounds must be a count >= 0, got {rounds!r}")
+    _check_count("revealed", revealed)
+    _check_count("rounds", rounds)
     if attainment is not None and not math.isfinite(attainment):
         raise ValueError(f"attainment must be finite or None, got {attainment!r}")
 
