@@ -38,7 +38,9 @@ Solve the stated problem with the smallest diff that actually solves it.
 
 Work lands through a pull request, never by pushing to `main` directly. One branch, one PR, one issue, `Closes #N` in the description. If you found a second problem while in there, open an issue for it and move on.
 
-**CodeRabbit reviews every PR, and its comments are not advisory.** Before merging, every one must be addressed — either fix it, or reply on the thread saying concretely why you are not (it conflicts with the issue's stated scope, it asks for the speculative abstraction rule 2 forbids, it is factually wrong about the code). "Noted" is not addressing it. Push the fixes to the same branch and let it re-review.
+**CodeRabbit reviews every PR, and its comments are not advisory.** A *review* is the comment stating findings ("Actionable comments posted: N") and its inline comments — not the summary/walkthrough it posts on arrival, not a "review in progress" placeholder, and not its edits to the PR description. A placeholder means the review is still coming: wait for it. Merging past one throws the review away, because a merged PR has nothing left to review.
+
+Before merging, every comment must be addressed — either fix it, or reply on the thread saying concretely why you are not (it conflicts with the issue's stated scope, it asks for the speculative abstraction rule 2 forbids, it is factually wrong about the code). "Noted" is not addressing it. Push the fixes to the same branch and let it re-review.
 
 Merge only when **both** hold: CI is green on the head commit, and no review comment is outstanding. A red build or an unanswered comment means the PR is not ready, however small the remaining point looks.
 
