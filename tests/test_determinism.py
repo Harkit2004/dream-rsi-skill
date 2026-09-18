@@ -228,14 +228,37 @@ def test_a_round_whose_columns_do_not_line_up_is_refused() -> None:
         SimResult.from_dict(payload)
 
 
-def test_a_non_finite_score_never_reaches_a_stored_trajectory() -> None:
-    """NaN and infinity are not scores, and ``NaN`` is not JSON either.
+@pytest.mark.parametrize("score", [math.nan, math.inf, -math.inf, True])
+def test_a_score_a_trajectory_cannot_hold_is_refused_where_it_enters(score: float) -> None:
+    """The producer is held to the contract the reader enforces, not a looser one.
 
-    A NaN stays the running best forever, because every comparison against it
-    is false, and an infinite attainment is rejected outright by
-    ``scoring.replay_score``. Worse, Python writes both as bare ``NaN`` and
-    ``Infinity`` tokens that no other JSON reader accepts, so an archive
-    carrying one is not the portable record this claims to be.
+    A replay that writes a score its own loader refuses produces a log that
+    cannot be read back — the archive is worthless exactly when someone comes
+    to inspect it. NaN and infinity qualify: a NaN stays the running best
+    forever because every comparison against it is false, an infinite
+    attainment is rejected outright by ``scoring.replay_score``, and Python
+    writes both as bare tokens no other JSON reader accepts. So does ``True``,
+    which is an ``int`` to ``isinstance`` and a JSON boolean on the way out.
+
+    Both places a node's score enters a trajectory are covered: the revealed
+    node, and the root a run starts from.
+    """
+    revealed = DiscoveryTree.with_root()
+    revealed.add_child(revealed.root_id, score=score)
+
+    with pytest.raises(TrajectoryError):
+        ReplaySimulator(revealed).replay(OpenOnce())
+
+    with pytest.raises(TrajectoryError):
+        ReplaySimulator(DiscoveryTree.with_root(score=score)).replay(StopImmediately())
+
+
+def test_a_stored_trajectory_is_read_and_written_as_standard_json() -> None:
+    """The reader's end of that same contract, and the writer's last line of defence.
+
+    ``SimResult`` is public: a caller can build one by hand, and ``to_json``
+    still may not emit the bare ``Infinity`` token that would make the archive
+    unreadable by anything but Python.
     """
     payload = _replay("narrow_deep").to_dict()
     payload["curve"][0]["best_score"] = math.inf
@@ -243,12 +266,12 @@ def test_a_non_finite_score_never_reaches_a_stored_trajectory() -> None:
     with pytest.raises(TrajectoryError):
         SimResult.from_dict(payload)
 
-    tree = DiscoveryTree.with_root()
-    tree.add_child(tree.root_id, score=math.nan)
-    result = ReplaySimulator(tree).replay(OpenOnce()).result()
+    by_hand = SimResult(
+        seed=0, world_size=1, stop_reason=None, attainment=math.inf, rounds=(), curve=()
+    )
 
     with pytest.raises(ValueError):
-        result.to_json()
+        by_hand.to_json()
 
 
 def test_a_scored_root_counts_toward_attainment() -> None:

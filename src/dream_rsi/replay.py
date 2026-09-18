@@ -88,11 +88,14 @@ STOP_ALL_REVEALED = "all_revealed"
 
 
 class TrajectoryError(ValueError):
-    """A stored trajectory carries a schema version or a field this code cannot read.
+    """A trajectory cannot be read, or cannot hold what a replay is putting in it.
 
-    One catchable type for "this log is not readable", as ``tree.TreeError`` is
+    One catchable type for "this log does not work", as ``tree.TreeError`` is
     for a tree, so a dreaming run that walks an archive can tell an unreadable
-    log from a bug in its own inspection code.
+    log from a bug in its own inspection code. Both ends of the trajectory
+    raise it, and both are held to the same contract: a replay that wrote a
+    score its own loader refuses would produce a log that cannot be read back,
+    which is worthless exactly when someone comes to inspect it.
     """
 
 
@@ -142,6 +145,18 @@ def _number(what: str, value: Any) -> float | None:
     if not math.isfinite(value):
         raise TrajectoryError(f"{what} must be a finite number, got {value!r}")
     return value
+
+
+def _score(node: Node) -> float | None:
+    """``s_v`` as a trajectory can hold it, or a refusal naming the node.
+
+    The same check the loader applies, at the other end: ``Node`` takes any
+    ``int`` or ``float`` as a score, which admits a bool and a NaN, and a
+    trajectory built from one could not be read back by :meth:`SimResult.from_dict`.
+    A recording that cannot be logged fails here, while the node that carries
+    the bad score can still be named.
+    """
+    return _number(f"score of node {node.id}", node.score)
 
 
 def _detached(node: Node) -> Node:
@@ -499,7 +514,7 @@ class ReplayRun:
         # initial workspace state and normally carries no ``s_v``, but the
         # schema permits one, and where it has one a policy has attained it
         # before making a single decision.
-        self._best: float | None = world._node(world.root_id).score
+        self._best: float | None = _score(world._node(world.root_id))
         self._stop_reason: str | None = None
 
     @property
@@ -598,14 +613,15 @@ class ReplayRun:
         from, not a score of nothing, and on a lower-is-better task converted
         to canonical units a zero would beat every real result.
         """
-        if node.score is not None and (self._best is None or node.score > self._best):
-            self._best = node.score
+        score = _score(node)
+        if score is not None and (self._best is None or score > self._best):
+            self._best = score
         self._curve.append(
             CurvePoint(
                 round_index=round_index,
                 node_id=node.id,
                 revealed=len(self._curve) + 1,
-                score=node.score,
+                score=score,
                 best_score=self._best,
             )
         )
