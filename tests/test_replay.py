@@ -81,12 +81,18 @@ class RecordedRounds:
 
 @dataclass
 class GrabbyPolicy:
-    """Writes into the tree it is handed, which must not be the recorded world."""
+    """Writes into the tree it is handed, which must not be the recorded world.
+
+    Both ways a policy could write: appending a node, and reaching through a
+    node's ``diagnostics`` mapping, which a frozen dataclass does not protect.
+    """
 
     rounds: int = 2
     _index: int = 0
 
     def select(self, tree: DiscoveryTree, eligible: tuple[str, ...], width: int) -> tuple[str, ...]:
+        for node in tree.iter_nodes():
+            node.diagnostics["text"] = "never recorded"
         tree.add_child(tree.root_id, artifact="never recorded", score=1e9)
         if self._index >= self.rounds:
             return ()
@@ -176,7 +182,7 @@ def test_two_policies_reveal_different_subsets_and_neither_mutates_the_tree(name
 def test_a_policy_cannot_write_into_the_recorded_world() -> None:
     """What the policy is handed each round is a copy, not the frozen world.
 
-    A policy is LLM-written code (issue #13); if it could append to the tree it
+    A policy is LLM-written code (issue #13); if it could write into the tree it
     observes, a later round — or the next policy over the same world — would
     read outcomes nothing ever executed.
     """
@@ -186,9 +192,15 @@ def test_a_policy_cannot_write_into_the_recorded_world() -> None:
 
     run = world.replay(GrabbyPolicy())
 
-    assert tree == before
+    assert tree == before, "a policy wrote through to the recorded tree"
     assert _ids(run.revealed) <= _ids(before)
-    assert _ids(world.replay(ExtendDeepest()).revealed) <= _ids(before)
+
+    # And the world it wrote through is not what the next policy replays.
+    after = world.replay(ExtendDeepest())
+    assert _ids(after.revealed) <= _ids(before)
+    assert all(
+        node == before.node(node.id) for node in after.revealed.iter_nodes()
+    ), "a policy's writes survived into the next replay over the same world"
 
 
 @pytest.mark.parametrize("name", NAMES)

@@ -56,6 +56,18 @@ STOP_MAX_ROUNDS = "max_rounds"
 STOP_ALL_REVEALED = "all_revealed"
 
 
+def _detached(node: Node) -> Node:
+    """A copy of ``node`` sharing nothing writable with it.
+
+    ``Node`` is frozen, but ``diagnostics`` is a plain mapping and its values
+    may nest, so holding the same node is enough for a policy to write into the
+    recording — the one thing a frozen world must make impossible. The
+    round-trip through the node's own serialisation copies the mutable parts,
+    because ``to_dict`` goes through ``dataclasses.asdict``.
+    """
+    return Node.from_dict(node.to_dict())
+
+
 class ReplayPolicy(Protocol):
     """The shared decision interface, as replay calls it (§3).
 
@@ -109,7 +121,7 @@ class ReplaySimulator:
     """
 
     def __init__(self, tree: DiscoveryTree) -> None:
-        self._nodes: dict[str, Node] = {node.id: node for node in tree.iter_nodes()}
+        self._nodes: dict[str, Node] = {node.id: _detached(node) for node in tree.iter_nodes()}
         self._root_id = tree.root_id
         children: dict[str, list[str]] = {}
         # Ascending id order is creation order (see tree.py), so "the
@@ -130,8 +142,8 @@ class ReplaySimulator:
         return len(self._nodes)
 
     def _node(self, node_id: str) -> Node:
-        """The recorded node, which is a frozen dataclass and safe to hand out."""
-        return self._nodes[node_id]
+        """The recorded node, detached so a reader cannot write back through it."""
+        return _detached(self._nodes[node_id])
 
     def _recorded_children(self, node_id: str) -> tuple[str, ...]:
         """This node's recorded children, earliest-created first."""
@@ -237,30 +249,32 @@ class ReplayRun:
         batch = tuple(batch)
         if not batch:
             raise ValueError("an empty batch ends a replay; it is not a round")
-        self._check(batch)
+        self._check(batch, self.eligible)
 
+        seen = set(self._revealed)
         revealed: list[str | None] = []
         for node_id in batch:
-            child = self._next_child(node_id)
+            child = self._next_child(node_id, seen)
             if child is not None:
                 self._revealed.append(child)
+                seen.add(child)
             revealed.append(child)
 
         round_ = ReplayRound(index=len(self._rounds), selected=batch, revealed=tuple(revealed))
         self._rounds.append(round_)
         return round_
 
-    def _check(self, batch: Sequence[str]) -> None:
+    def _check(self, batch: Sequence[str], eligible: Sequence[str]) -> None:
         """Reject anything outside ``A(T^{m,k})`` — the prefix-observability rule."""
-        allowed = set(self.eligible)
+        allowed = set(eligible)
         outside = [node_id for node_id in batch if node_id not in allowed]
         if outside:
             raise ValueError(
                 f"policy selected node(s) outside A(T): {', '.join(sorted(set(outside)))}; "
-                f"eligible are {', '.join(self.eligible)}"
+                f"eligible are {', '.join(eligible)}"
             )
 
-    def _next_child(self, node_id: str) -> str | None:
+    def _next_child(self, node_id: str, revealed: set[str]) -> str | None:
         """``Child(v; T, T^{m,k})``: the continuation this selection retrieves (§3).
 
         PAPER-GAP: §3 gives the root the earliest-created unrevealed child and
@@ -273,10 +287,10 @@ class ReplayRun:
         wherever a node has at most one child — and it keeps a recorded rollout
         replayable by its own decisions. Note a consequence: a node's later
         children become unreachable once it stops being a leaf, so a world with
-        a branching non-root node can never be fully revealed. Revisit if the
-        authors' implementation lands (see references/method.md).
+        a branching non-root node can never be fully revealed — issue #31, which
+        belongs to how a rollout records duplicate selections, not to reveal.
+        Revisit if the authors' implementation lands (see references/method.md).
         """
-        revealed = set(self._revealed)
         for child in self._world._recorded_children(node_id):
             if child not in revealed:
                 return child
