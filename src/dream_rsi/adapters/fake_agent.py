@@ -51,9 +51,12 @@ class FakeAgent:
     def propose(self, context: AgentContext) -> Artifact:
         """Produce the candidate this context always produces."""
         digest = _fingerprint(context)
-        body = self.script[int(digest, 16) % len(self.script)]
+        # Passed through untouched: the script may be in any language the task
+        # scores — the paper's own domains include CUDA kernels — so there is no
+        # comment syntax this can safely stamp an identifier into. The digest
+        # goes in the proposal, which is prose.
         return Artifact(
-            content=f"# attempt {digest}\n{body}",
+            content=self.script[int(digest, 16) % len(self.script)],
             proposal=(
                 f"scripted attempt {digest}, resuming {context.parent.id} "
                 f"after {len(context.observations)} inherited observation(s)"

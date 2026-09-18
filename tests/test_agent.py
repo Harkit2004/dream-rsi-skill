@@ -104,8 +104,9 @@ def test_scripted_artifacts_are_evaluable(tmp_path):
     # The adapters have to meet: what the agent returns as ``content`` is what
     # ``TaskEvaluator.evaluate`` is handed and what a node records.
     evaluator = ToyEvaluator()
-    for content in FakeAgent().script:
-        result = evaluator.evaluate(content, tmp_path)
+    agent = FakeAgent()
+    for seed in range(12):
+        result = evaluator.evaluate(agent.propose(context(tmp_path, seed=seed)).content, tmp_path)
         assert result.evaluated is True
         assert result.correct is True
 
