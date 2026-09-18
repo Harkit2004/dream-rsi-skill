@@ -22,7 +22,7 @@ shipped in the repo is the deterministic
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -64,7 +64,7 @@ class AgentContext:
 
     problem: str
     workspace: Path
-    history: tuple[Node, ...] = field(default_factory=tuple)
+    history: tuple[Node, ...]
     observations: tuple[str, ...] = ()
 
     # PAPER-GAP: the paper treats generation as stochastic (§3, online rollout)

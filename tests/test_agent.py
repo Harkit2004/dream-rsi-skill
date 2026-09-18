@@ -132,8 +132,11 @@ def test_src_imports_only_the_standard_library_and_itself():
     # package declares no runtime dependencies, so the check is exact rather
     # than a denylist of provider names to keep up to date.
     src = Path(__file__).resolve().parents[1] / "src"
+    sources = sorted(src.rglob("*.py"))
+    assert sources, f"no sources found under {src}: the check would pass vacuously"
+
     offenders: dict[str, set[str]] = {}
-    for path in sorted(src.rglob("*.py")):
+    for path in sources:
         for statement in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(statement, ast.Import):
                 imported = [alias.name for alias in statement.names]
