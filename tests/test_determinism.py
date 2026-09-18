@@ -23,6 +23,7 @@ import pytest
 
 from dream_rsi.replay import (
     SIM_RESULT_SCHEMA_VERSION,
+    ReplayRound,
     ReplaySimulator,
     SimResult,
     TrajectoryError,
@@ -333,12 +334,27 @@ def test_a_stored_trajectory_is_read_and_written_as_standard_json() -> None:
     with pytest.raises(TrajectoryError):
         SimResult.from_dict(payload)
 
-    by_hand = SimResult(
-        seed=0, world_size=1, stop_reason=None, attainment=math.inf, rounds=(), curve=()
-    )
+    # Two ways a hand-built result fails to encode — a value JSON has no token
+    # for, and a value whose type it cannot serialise at all. The encoder
+    # raises ValueError for one and TypeError for the other; both mean the same
+    # thing to a caller, so both arrive as TrajectoryError.
+    unwritable = [
+        SimResult(
+            seed=0, world_size=1, stop_reason=None, attainment=math.inf, rounds=(), curve=()
+        ),
+        SimResult(
+            seed=0,
+            world_size=2,
+            stop_reason=None,
+            attainment=None,
+            rounds=(ReplayRound(index=0, selected=(object(),), revealed=(None,), observations=((),)),),
+            curve=(),
+        ),
+    ]
 
-    with pytest.raises(TrajectoryError):
-        by_hand.to_json()
+    for result in unwritable:
+        with pytest.raises(TrajectoryError):
+            result.to_json()
 
 
 def test_a_scored_root_counts_toward_attainment() -> None:

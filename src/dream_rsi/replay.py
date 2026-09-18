@@ -377,7 +377,9 @@ class SimResult:
         """
         try:
             return json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False) + "\n"
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
+            # ValueError for a value JSON has no token for, TypeError for one
+            # it cannot serialise at all. Both mean the same thing to a caller.
             raise TrajectoryError(f"this trajectory cannot be written as JSON: {exc}") from exc
 
     @classmethod
