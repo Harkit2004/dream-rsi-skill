@@ -85,19 +85,21 @@ def test_siblings_resumed_from_one_snapshot_cannot_see_each_other(tmp_path):
     source = build_workspace(tmp_path / "source")
     base = store.capture(source)
 
-    with store.checkout(base, "attempt_000000") as first:
-        with store.checkout(base, "attempt_000001") as second:
-            # Each attempt starts from the parent's saved workspace (§3).
-            assert listing(first) == listing(source)
-            assert listing(second) == listing(source)
+    with (
+        store.checkout(base, "attempt_000000") as first,
+        store.checkout(base, "attempt_000001") as second,
+    ):
+        # Each attempt starts from the parent's saved workspace (§3).
+        assert listing(first) == listing(source)
+        assert listing(second) == listing(source)
 
-            (first / "notes.txt").write_text("first")
-            (second / "notes.txt").write_text("second")
+        (first / "notes.txt").write_text("first")
+        (second / "notes.txt").write_text("second")
 
-            assert first != second
-            assert (first / "notes.txt").read_text() == "first"
-            assert (second / "notes.txt").read_text() == "second"
-            first_ref = store.capture(first)
+        assert first != second
+        assert (first / "notes.txt").read_text() == "first"
+        assert (second / "notes.txt").read_text() == "second"
+        first_ref = store.capture(first)
 
     assert not (store.materialize(base, tmp_path / "base") / "notes.txt").exists()
     assert (store.materialize(first_ref, tmp_path / "first") / "notes.txt").read_text() == "first"
@@ -109,11 +111,13 @@ def test_the_workspace_is_removed_even_when_the_attempt_raises(tmp_path):
     store = SnapshotStore(tmp_path / "store")
     base = store.capture(build_workspace(tmp_path / "source"))
 
-    with pytest.raises(RuntimeError, match="worker exploded"):
-        with store.checkout(base, "attempt_000000") as workspace:
-            abandoned = workspace
-            (workspace / "half-written.txt").write_text("...")
-            raise RuntimeError("worker exploded")
+    with (
+        pytest.raises(RuntimeError, match="worker exploded"),
+        store.checkout(base, "attempt_000000") as workspace,
+    ):
+        abandoned = workspace
+        (workspace / "half-written.txt").write_text("...")
+        raise RuntimeError("worker exploded")
 
     assert not abandoned.exists()
     with store.checkout(base, "attempt_000000") as reused:
@@ -127,9 +131,11 @@ def test_a_name_already_checked_out_is_refused(tmp_path):
     base = store.capture(build_workspace(tmp_path / "source"))
 
     with store.checkout(base, "attempt_000000") as live:
-        with pytest.raises(SnapshotError, match="already in use"):
-            with store.checkout(base, "attempt_000000"):
-                pass
+        with (
+            pytest.raises(SnapshotError, match="already in use"),
+            store.checkout(base, "attempt_000000"),
+        ):
+            pass
         assert live.is_dir(), "the refused checkout must not disturb the live one"
 
 
@@ -140,9 +146,8 @@ def test_a_workspace_name_that_is_not_one_directory_is_refused(tmp_path, name):
     store = SnapshotStore(tmp_path / "store")
     base = store.capture(build_workspace(tmp_path / "source"))
 
-    with pytest.raises(SnapshotError, match="workspace name"):
-        with store.checkout(base, name):
-            pass
+    with pytest.raises(SnapshotError, match="workspace name"), store.checkout(base, name):
+        pass
 
 
 def test_an_unknown_snapshot_is_refused(tmp_path):
