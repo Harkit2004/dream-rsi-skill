@@ -25,8 +25,12 @@ would copy its target's bytes into the snapshot, and a link to something outside
 the workspace would drag that in with it. References are content addresses (a
 digest over the whole state), so an attempt that changed nothing costs no
 storage and a re-recorded rollout mints identical refs, which is what keeps a
-recorded tree byte-identical across runs (AGENTS.md rule 5). Revisit if the
-authors' implementation lands (see references/method.md).
+recorded tree byte-identical across runs (AGENTS.md rule 5). Modification times
+are deliberately outside that state: a copy carries them along, but two states
+differing only in an mtime are one state here, because a content address built
+over wall-clock stamps would mint a fresh ref every time the same rollout was
+recorded again and cost exactly that guarantee. Revisit if the authors'
+implementation lands (see references/method.md).
 """
 
 from __future__ import annotations
