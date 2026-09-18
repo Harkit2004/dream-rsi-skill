@@ -285,6 +285,41 @@ def test_a_hand_stepped_run_records_the_seed_it_was_started_with() -> None:
     assert result.revealed == 1
 
 
+def test_a_batch_that_cannot_be_logged_leaves_the_run_untouched() -> None:
+    """A refused reveal is not a half-taken round.
+
+    The check runs per node, so a batch whose second selection carries
+    something a trajectory cannot hold would otherwise leave the first child
+    revealed with no ``ReplayRound`` describing it — and ``_next_child`` would
+    treat the failed one as already revealed on the next attempt. The round is
+    all or nothing.
+    """
+    tree = DiscoveryTree.with_root()
+    tree.add_child(tree.root_id, score=1.0, observations=("fine",))
+    tree.add_child(tree.root_id, score=2.0, observations=(17,))
+
+    run = ReplaySimulator(tree).start()
+    before = run.revealed
+
+    with pytest.raises(TrajectoryError):
+        run.reveal((run.revealed.root_id, run.revealed.root_id))
+
+    assert run.revealed == before
+    assert run.rounds == ()
+    assert run.curve == ()
+
+
+def test_a_seed_a_trajectory_cannot_hold_is_refused_where_it_enters() -> None:
+    """The seed is held to the contract it is read back under, like every other field.
+
+    ``True`` is an ``int`` to ``isinstance`` and a JSON boolean on the way out,
+    which the loader refuses — so a run started with one would produce an
+    archive that cannot be read.
+    """
+    with pytest.raises(TrajectoryError):
+        ReplaySimulator(_load("narrow_deep")).start(seed=True)
+
+
 def test_a_stored_trajectory_is_read_and_written_as_standard_json() -> None:
     """The reader's end of that same contract, and the writer's last line of defence.
 
@@ -302,7 +337,7 @@ def test_a_stored_trajectory_is_read_and_written_as_standard_json() -> None:
         seed=0, world_size=1, stop_reason=None, attainment=math.inf, rounds=(), curve=()
     )
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TrajectoryError):
         by_hand.to_json()
 
 

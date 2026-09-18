@@ -375,7 +375,10 @@ class SimResult:
         is not the portable archive a dreaming run is inspected from, so a
         world carrying such a score fails here rather than on whoever reads it.
         """
-        return json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False) + "\n"
+        try:
+            return json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False) + "\n"
+        except ValueError as exc:
+            raise TrajectoryError(f"this trajectory cannot be written as JSON: {exc}") from exc
 
     @classmethod
     def from_dict(cls, payload: Any) -> SimResult:
@@ -521,7 +524,7 @@ class ReplayRun:
 
     def __init__(self, world: ReplaySimulator, *, seed: int = DEFAULT_SEED) -> None:
         self._world = world
-        self._seed = seed
+        self._seed = _integer("seed", seed)
         self._revealed: list[str] = [world.root_id]
         self._rounds: list[ReplayRound] = []
         self._curve: list[CurvePoint] = []
@@ -600,17 +603,26 @@ class ReplayRun:
         seen = set(self._revealed)
         revealed: list[str | None] = []
         observations: list[tuple[str, ...]] = []
+        # Staged, not committed: a node whose score or observations a trajectory
+        # cannot hold refuses the whole round rather than half of it. Committing
+        # as we go would leave earlier children revealed with no ``ReplayRound``
+        # describing them, and ``_next_child`` would skip the failed one as
+        # already revealed on the next attempt.
+        pending: list[tuple[Node, float | None]] = []
         for node_id in batch:
             child = self._next_child(node_id, seen)
             if child is None:
                 observations.append(())
             else:
-                self._revealed.append(child)
                 seen.add(child)
                 node = self._world._node(child)
                 observations.append(_observations(node))
-                self._record(index, node)
+                pending.append((node, _score(node)))
             revealed.append(child)
+
+        for node, score in pending:
+            self._revealed.append(node.id)
+            self._record(index, node, score)
 
         round_ = ReplayRound(
             index=index,
@@ -621,7 +633,7 @@ class ReplayRun:
         self._rounds.append(round_)
         return round_
 
-    def _record(self, round_index: int, node: Node) -> None:
+    def _record(self, round_index: int, node: Node, score: float | None) -> None:
         """Extend the attainment curve with one newly revealed node.
 
         The running best ignores an unscored node rather than treating it as a
@@ -629,7 +641,6 @@ class ReplayRun:
         from, not a score of nothing, and on a lower-is-better task converted
         to canonical units a zero would beat every real result.
         """
-        score = _score(node)
         if score is not None and (self._best is None or score > self._best):
             self._best = score
         self._curve.append(
