@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -41,14 +41,14 @@ def _ids(tree: DiscoveryTree) -> set[str]:
 class OpenBranches:
     """Keeps opening branches off the root; stops once a round revealed nothing."""
 
-    width: int = 2
+    per_round: int = 2
     _size: int = 0
 
     def select(self, tree: DiscoveryTree, eligible: tuple[str, ...], width: int) -> tuple[str, ...]:
         if len(tree) == self._size:
             return ()
         self._size = len(tree)
-        return (tree.root_id,) * self.width
+        return (tree.root_id,) * self.per_round
 
 
 @dataclass
@@ -98,10 +98,7 @@ class GrabbyPolicy:
 class AlwaysRoot:
     """Selects the root forever, exhausted branches or not."""
 
-    selected: list[str] = field(default_factory=list)
-
     def select(self, tree: DiscoveryTree, eligible: tuple[str, ...], width: int) -> tuple[str, ...]:
-        self.selected.append(tree.root_id)
         return (tree.root_id,)
 
 
@@ -234,7 +231,7 @@ def test_a_policy_that_never_stops_is_cut_off_at_the_round_limit() -> None:
 def test_a_policy_that_selects_nothing_ends_the_replay() -> None:
     """The paper's other termination rule, and the one that leaves k* honest."""
     # Only the root's branches, so the replay gives up with nodes still unseen.
-    run = ReplaySimulator(_load("failing_branch")).replay(OpenBranches(width=1))
+    run = ReplaySimulator(_load("failing_branch")).replay(OpenBranches(per_round=1))
 
     assert run.stop_reason == STOP_EMPTY_BATCH
     assert not run.complete
