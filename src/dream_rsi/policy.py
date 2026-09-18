@@ -342,7 +342,10 @@ class BudgetAwarePolicy(OptimalPolicy):
     def reset(self, rng: random.Random | None = None) -> None:
         super().reset(rng)
         self._best: float | None = None
-        self._size = 1
+        # Unset until the first decision, so a policy handed a world someone
+        # else has already revealed part of does not read that as a round of its
+        # own that improved nothing.
+        self._size: int | None = None
         self._stagnant = 0
 
     def _schedule(self) -> dict[str, int]:
@@ -373,7 +376,7 @@ class BudgetAwarePolicy(OptimalPolicy):
             return ()
 
         slots = min(width, room)
-        batch = [tree.root_id] if tree.root_id in live and slots else []
+        batch = [tree.root_id] if tree.root_id in live and slots > 0 else []
         batch.extend(_by_anchor(tree, live)[: slots - len(batch)])
         return tuple(batch)
 
@@ -388,7 +391,7 @@ class BudgetAwarePolicy(OptimalPolicy):
         if best is not None and (self._best is None or best > self._best):
             self._best = best
             self._stagnant = 0
-        elif len(tree) > self._size:
+        elif self._size is not None and len(tree) > self._size:
             self._stagnant += 1
         self._size = len(tree)
 
