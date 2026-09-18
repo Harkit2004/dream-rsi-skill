@@ -28,6 +28,7 @@ __all__ = [
     "SchemaVersionError",
     "TreeError",
     "TreeInvariantError",
+    "eligible_nodes",
 ]
 
 # Bumped whenever the on-disk layout changes in a way older readers would
@@ -229,6 +230,26 @@ class DiscoveryTree:
     @classmethod
     def load(cls, path: str | Path) -> DiscoveryTree:
         return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
+
+def eligible_nodes(tree: DiscoveryTree) -> tuple[str, ...]:
+    """``A(T) = {r} ∪ {v ∈ T : v is a leaf}``, root first, then leaves by id (§3).
+
+    The root stays selectable whether or not it has children — that is how a
+    rollout opens further branches — so it appears exactly once even when it is
+    itself a leaf.
+
+    This lives beside the tree rather than beside either caller because the
+    online rollout and offline replay "use this same decision interface" (§3):
+    ``A(T)`` is read off whichever tree the policy is currently observing, the
+    one being built online or the revealed subtree of a frozen world.
+    """
+    root_id = tree.root_id
+    parents = {node.parent_id for node in tree.iter_nodes()}
+    leaves = tuple(
+        node.id for node in tree.iter_nodes() if node.id != root_id and node.id not in parents
+    )
+    return (root_id, *leaves)
 
 
 def _validate(nodes: Mapping[str, Node]) -> str:
