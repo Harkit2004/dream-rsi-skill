@@ -80,8 +80,10 @@ class SnapshotStore:
     def capture(self, directory: str | Path) -> str:
         """Record the state of ``directory`` and return its ``snapshot_ref``.
 
-        Capturing a state already recorded returns the existing ref and copies
-        nothing.
+        The ref describes what was stored: it is the digest of the copy this
+        made, so it stays a content address even if the workspace was still
+        changing while it was read. Capturing a state already recorded returns
+        the existing ref and copies nothing.
         """
         source = Path(directory)
         # The copy below runs through the store's own staging directory, so a
@@ -92,24 +94,33 @@ class SnapshotStore:
             raise SnapshotError(
                 f"snapshot store must not be inside the captured directory: {self._root}"
             )
+        snapshots = self._root / _SNAPSHOTS_DIRNAME
         ref = _digest(source)
-        target = self._root / _SNAPSHOTS_DIRNAME / ref
-        if target.is_dir():
+        if (snapshots / ref).is_dir():
             return ref
 
-        target.parent.mkdir(parents=True, exist_ok=True)
+        snapshots.mkdir(parents=True, exist_ok=True)
         # Copied aside and renamed into place, so a reader never sees a
         # half-written snapshot under a ref that promises the whole state.
-        staging = Path(tempfile.mkdtemp(dir=target.parent, prefix=".staging-"))
+        staging = Path(tempfile.mkdtemp(dir=snapshots, prefix=".staging-"))
         try:
-            shutil.copytree(source, staging / "state", symlinks=True)
-            try:
-                os.replace(staging / "state", target)
-            except OSError:
-                # Another worker captured the same state first. Same digest,
-                # same bytes: theirs will do.
-                if not target.is_dir():
-                    raise
+            state = staging / "state"
+            shutil.copytree(source, state, symlinks=True)
+            # Digested after the copy, not before: the ref has to describe the
+            # bytes this actually stores. The two differ only if the workspace
+            # changed while it was being read — an agent that left something
+            # running in it — and then the earlier digest describes a state that
+            # was never recorded anywhere.
+            ref = _digest(state)
+            target = snapshots / ref
+            if not target.is_dir():
+                try:
+                    os.replace(state, target)
+                except OSError:
+                    # Another worker captured the same state first. Same digest,
+                    # same bytes: theirs will do.
+                    if not target.is_dir():
+                        raise
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         return ref
