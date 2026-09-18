@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any
 
 __all__ = [
     "SCHEMA_VERSION",
