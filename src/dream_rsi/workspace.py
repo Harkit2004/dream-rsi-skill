@@ -84,6 +84,14 @@ class SnapshotStore:
         nothing.
         """
         source = Path(directory)
+        # The copy below runs through the store's own staging directory, so a
+        # store inside the captured directory would copy its own output, over
+        # and over. A workspace *below* the store is the normal case and stays
+        # allowed: that is where ``checkout`` puts one.
+        if _contains(source, self._root):
+            raise SnapshotError(
+                f"snapshot store must not be inside the captured directory: {self._root}"
+            )
         ref = _digest(source)
         target = self._root / _SNAPSHOTS_DIRNAME / ref
         if target.is_dir():
@@ -136,6 +144,13 @@ class SnapshotStore:
             shutil.rmtree(workspace, ignore_errors=True)
 
 
+def _contains(directory: Path, other: Path) -> bool:
+    """Is ``other`` ``directory`` itself or something under it?"""
+    resolved = other.resolve()
+    root = directory.resolve()
+    return resolved == root or resolved.is_relative_to(root)
+
+
 def _checked_name(name: str) -> str:
     """Reject a workspace name that is not a single directory under the store.
 
@@ -172,8 +187,15 @@ def _digest(directory: Path) -> str:
 
 
 def _entries(directory: Path) -> list[tuple[str, str, int, bytes]]:
-    """Every path under ``directory`` as ``(relative, kind, mode, payload)``, sorted."""
-    entries = []
+    """``directory`` and every path under it as ``(relative, kind, mode, payload)``, sorted.
+
+    The workspace root is an entry of its own, under the empty relative path: a
+    copy preserves its mode too, so two states that differ only there are two
+    states.
+    """
+    if not directory.is_dir() or directory.is_symlink():
+        raise SnapshotError(f"not a workspace directory: {directory}")
+    entries = [("", "dir", stat.S_IMODE(directory.lstat().st_mode), b"")]
     for path in _walk(directory):
         status = path.lstat()
         mode = stat.S_IMODE(status.st_mode)
@@ -196,8 +218,6 @@ def _entries(directory: Path) -> list[tuple[str, str, int, bytes]]:
 
 def _walk(directory: Path) -> Iterator[Path]:
     """Every path under ``directory``, never descending through a symlink."""
-    if not directory.is_dir() or directory.is_symlink():
-        raise SnapshotError(f"not a workspace directory: {directory}")
     pending = [directory]
     while pending:
         for child in pending.pop().iterdir():

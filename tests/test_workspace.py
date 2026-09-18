@@ -77,6 +77,31 @@ def test_snapshots_of_equal_states_are_the_same_snapshot(tmp_path):
     assert store.capture(source) != ref
 
 
+def test_the_workspace_roots_own_mode_is_part_of_the_snapshot(tmp_path):
+    # It is state a copy preserves, so two states that differ in it are two
+    # snapshots — otherwise the second capture hands back the first one's ref and
+    # the mode a child resumes under is the one its parent no longer had.
+    store = SnapshotStore(tmp_path / "store")
+    source = build_workspace(tmp_path / "source")
+
+    ref = store.capture(source)
+    source.chmod(0o750)
+    changed = store.capture(source)
+
+    assert changed != ref
+    assert store.materialize(changed, tmp_path / "restored").lstat().st_mode & 0o777 == 0o750
+
+
+def test_capturing_a_directory_that_holds_the_store_is_refused(tmp_path):
+    # The capture copies through the store's own staging directory, so a store
+    # sitting inside the workspace would have the copy walk into its own output.
+    source = build_workspace(tmp_path / "source")
+    store = SnapshotStore(source / "store")
+
+    with pytest.raises(SnapshotError, match="must not be inside"):
+        store.capture(source)
+
+
 def test_siblings_resumed_from_one_snapshot_cannot_see_each_other(tmp_path):
     # Two workers expanding sibling nodes run against the same parent snapshot at
     # the same time; neither may observe the other's writes, and neither may
