@@ -1,0 +1,159 @@
+{
+  "nodes": [
+    {
+      "artifact": null,
+      "diagnostics": {},
+      "id": "n000000",
+      "observations": [],
+      "parent_id": null,
+      "score": null,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (0, 0)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 12.0,
+        "text": "plan (0, 0) costs 0, throughput 12.0"
+      },
+      "id": "n000001",
+      "observations": [
+        "plan (0, 0) costs 0, throughput 12.0"
+      ],
+      "parent_id": "n000000",
+      "score": 12.0,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (1, 1)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 18.0,
+        "text": "plan (1, 1) costs 2, throughput 18.0"
+      },
+      "id": "n000002",
+      "observations": [
+        "plan (1, 1) costs 2, throughput 18.0"
+      ],
+      "parent_id": "n000000",
+      "score": 18.0,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (2, 2)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 11.0,
+        "text": "plan (2, 2) costs 4, throughput 11.0"
+      },
+      "id": "n000003",
+      "observations": [
+        "plan (2, 2) costs 4, throughput 11.0"
+      ],
+      "parent_id": "n000000",
+      "score": 11.0,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (4, 2)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 14.0,
+        "text": "plan (4, 2) costs 6, throughput 14.0"
+      },
+      "id": "n000004",
+      "observations": [
+        "plan (4, 2) costs 6, throughput 14.0"
+      ],
+      "parent_id": "n000000",
+      "score": 14.0,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (2, 4)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 16.0,
+        "text": "plan (2, 4) costs 6, throughput 16.0"
+      },
+      "id": "n000005",
+      "observations": [
+        "plan (2, 4) costs 6, throughput 16.0"
+      ],
+      "parent_id": "n000000",
+      "score": 16.0,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (3, 3)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 19.0,
+        "text": "plan (3, 3) costs 6, throughput 19.0"
+      },
+      "id": "n000006",
+      "observations": [
+        "plan (3, 3) costs 6, throughput 19.0"
+      ],
+      "parent_id": "n000000",
+      "score": 19.0,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (0, 4)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 6.0,
+        "text": "plan (0, 4) costs 4, throughput 6.0"
+      },
+      "id": "n000007",
+      "observations": [
+        "plan (0, 4) costs 4, throughput 6.0"
+      ],
+      "parent_id": "n000000",
+      "score": 6.0,
+      "snapshot_ref": null
+    },
+    {
+      "artifact": "PLAN = (4, 0)\n",
+      "diagnostics": {
+        "correct": true,
+        "direction": "higher_is_better",
+        "error": null,
+        "fail_class": "ok",
+        "raw_score": 6.0,
+        "text": "plan (4, 0) costs 4, throughput 6.0"
+      },
+      "id": "n000008",
+      "observations": [
+        "plan (4, 0) costs 4, throughput 6.0"
+      ],
+      "parent_id": "n000000",
+      "score": 6.0,
+      "snapshot_ref": null
+    }
+  ],
+  "root_id": "n000000",
+  "schema_version": 1
+}

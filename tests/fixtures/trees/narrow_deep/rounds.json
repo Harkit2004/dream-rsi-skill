@@ -1,0 +1,65 @@
+{
+  "rounds": [
+    {
+      "index": 0,
+      "k": 1,
+      "produced": [
+        "n000001"
+      ],
+      "selected": [
+        "n000000"
+      ]
+    },
+    {
+      "index": 1,
+      "k": 1,
+      "produced": [
+        "n000002"
+      ],
+      "selected": [
+        "n000001"
+      ]
+    },
+    {
+      "index": 2,
+      "k": 1,
+      "produced": [
+        "n000003"
+      ],
+      "selected": [
+        "n000002"
+      ]
+    },
+    {
+      "index": 3,
+      "k": 1,
+      "produced": [
+        "n000004"
+      ],
+      "selected": [
+        "n000003"
+      ]
+    },
+    {
+      "index": 4,
+      "k": 1,
+      "produced": [
+        "n000005"
+      ],
+      "selected": [
+        "n000004"
+      ]
+    },
+    {
+      "index": 5,
+      "k": 1,
+      "produced": [
+        "n000006"
+      ],
+      "selected": [
+        "n000005"
+      ]
+    }
+  ],
+  "stop_reason": "empty_batch"
+}
