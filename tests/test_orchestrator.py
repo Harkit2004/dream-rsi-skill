@@ -85,7 +85,7 @@ class SeedAgent:
 class ExplodingAgent:
     """Raises on odd-seeded attempts and behaves on the rest."""
 
-    inner: FakeAgent = FakeAgent()
+    inner: FakeAgent = field(default_factory=FakeAgent)
 
     def propose(self, context: AgentContext) -> Artifact:
         if (context.seed or 0) % 2:
