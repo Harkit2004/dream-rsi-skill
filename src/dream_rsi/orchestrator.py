@@ -37,7 +37,7 @@ from dream_rsi.adapters.agent import AgentContext, CodingAgent
 from dream_rsi.adapters.evaluator import EvalResult, TaskEvaluator, safe_evaluate
 from dream_rsi.adapters.fake_agent import FakeAgent
 from dream_rsi.adapters.toy_evaluator import ToyEvaluator
-from dream_rsi.tree import DiscoveryTree, Node
+from dream_rsi.tree import DiscoveryTree, Node, eligible_nodes
 from dream_rsi.workspace import SnapshotStore
 
 __all__ = [
@@ -197,21 +197,6 @@ class FirstEligiblePolicy:
         self, tree: DiscoveryTree, eligible: Sequence[str], width: int
     ) -> Sequence[str]:
         return tuple(eligible[:width])
-
-
-def eligible_nodes(tree: DiscoveryTree) -> tuple[str, ...]:
-    """``A(T) = {r} ∪ {v ∈ T : v is a leaf}``, root first, then leaves by id (§3).
-
-    The root stays selectable whether or not it has children — that is how a
-    rollout opens further branches — so it appears exactly once even when it is
-    itself a leaf.
-    """
-    root_id = tree.root_id
-    parents = {node.parent_id for node in tree.iter_nodes()}
-    leaves = tuple(
-        node.id for node in tree.iter_nodes() if node.id != root_id and node.id not in parents
-    )
-    return (root_id, *leaves)
 
 
 def run_rollout(
