@@ -21,9 +21,13 @@ Solve the stated problem with the smallest diff that actually solves it.
 - No new dependency without a line in the PR saying what it replaces and why vendoring or stdlib won't do.
 - Deleting code counts as a change too — don't remove things you merely find unfamiliar.
 
-## 3. One issue, one change
+## 3. One issue, one PR
 
-Every PR closes exactly one issue and says `Closes #N`. If you found a second problem while in there, open an issue for it and move on.
+Work lands through a pull request, never by pushing to `main` directly. One branch, one PR, one issue, `Closes #N` in the description. If you found a second problem while in there, open an issue for it and move on.
+
+**CodeRabbit reviews every PR, and its comments are not advisory.** Before merging, every one must be addressed — either fix it, or reply on the thread saying concretely why you are not (it conflicts with the issue's stated scope, it asks for the speculative abstraction rule 2 forbids, it is factually wrong about the code). "Noted" is not addressing it. Push the fixes to the same branch and let it re-review.
+
+Merge only when **both** hold: CI is green on the head commit, and no review comment is outstanding. A red build or an unanswered comment means the PR is not ready, however small the remaining point looks.
 
 ## 4. Don't invent the paper's details
 
@@ -53,4 +57,9 @@ Run the tests. Paste real output in the PR. "Should work" and "tests pass" witho
 
 - Imperative subject line under 72 chars: `add prefix-observable reveal to ReplaySimulator`
 - Body says *why*, not *what* — the diff already says what.
-- No force-push to `main`.
+- Branch name: `issue-<N>-<short-slug>`.
+- No force-push, on any branch someone else may have reviewed.
+
+## 9. Keep CI and local identical
+
+`pyproject.toml` pins exact versions of `pytest` and `ruff`. Leave them pinned. An unpinned linter means a run can report "all checks passed" locally and fail the identical command in CI, which is how the first green-locally/red-on-CI commit happened. Bump the pin deliberately, in its own change, with the new version's complaints fixed in the same PR.
