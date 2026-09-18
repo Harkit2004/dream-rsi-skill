@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -64,7 +65,7 @@ class ReselectPolicy:
 
 @dataclass(frozen=True)
 class SeedAgent:
-    """Stamps each attempt's seed into its artifact, so attempts are telling apart.
+    """Stamps each attempt's seed into its artifact, so attempts can be told apart.
 
     With ``jitter`` set, even-seeded attempts — the ones submitted first, since
     seeds ascend with submission — take the longest to return. A rollout that
@@ -280,10 +281,10 @@ def test_module_entrypoint_writes_a_loadable_tree(tmp_path):
         [sys.executable, "-m", "dream_rsi.orchestrator", str(tmp_path / "run")],
         capture_output=True,
         text=True,
-        env={
-            "PATH": "/usr/bin:/bin",
-            "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-        },
+        # src on the path so this passes whether or not the package is installed;
+        # the rest of the environment is inherited, because a hosted runner's
+        # interpreter needs its own LD_LIBRARY_PATH to start at all.
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
         check=False,
     )
 
