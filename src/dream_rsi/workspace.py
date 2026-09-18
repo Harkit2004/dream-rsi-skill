@@ -163,7 +163,9 @@ def _digest(directory: Path) -> str:
     """
     digest = hashlib.sha256()
     for relative, kind, mode, payload in _entries(directory):
-        for part in (kind.encode(), f"{mode:04o}".encode(), relative.encode(), payload):
+        # ``os.fsencode``, not ``str.encode``: a filename the filesystem accepts
+        # need not be valid UTF-8, and a workspace has to digest either way.
+        for part in (kind.encode(), f"{mode:04o}".encode(), os.fsencode(relative), payload):
             digest.update(len(part).to_bytes(8, "big"))
             digest.update(part)
     return digest.hexdigest()
@@ -177,7 +179,7 @@ def _entries(directory: Path) -> list[tuple[str, str, int, bytes]]:
         mode = stat.S_IMODE(status.st_mode)
         relative = path.relative_to(directory).as_posix()
         if stat.S_ISLNK(status.st_mode):
-            entries.append((relative, "link", mode, os.readlink(path).encode()))
+            entries.append((relative, "link", mode, os.fsencode(os.readlink(path))))
         elif stat.S_ISDIR(status.st_mode):
             entries.append((relative, "dir", mode, b""))
         elif stat.S_ISREG(status.st_mode):
