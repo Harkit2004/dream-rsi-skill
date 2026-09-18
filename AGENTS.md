@@ -12,6 +12,19 @@ Write the failing test first. Every bug fix and every feature.
 
 If a test is genuinely impractical to write first, say so explicitly in the PR and explain why — don't skip silently.
 
+## 1a. Test behaviour, not lines
+
+Tests exist to catch a change that breaks something real. Write the ones that would.
+
+- **Cover the behaviour the issue names**, not every line you happened to write. The issue's "Tests first" list is the target. Line or branch coverage is not.
+- **Before keeping a test, say what bug it catches.** If you can't name a plausible wrong implementation it would fail against, delete it — it is costing maintenance and proving nothing.
+- **Don't test the language.** Dataclass field assignment, a getter returning what was set, a constructor storing its arguments, a stdlib call doing its documented job: none of these need a test.
+- **Don't assert on internals.** Private attributes, exact call sequences, how state is stored. Assert on what a caller can observe: return values, raised exceptions, the file that ends up on disk.
+- **A correct rewrite should keep the tests green.** If you could reimplement the module differently but correctly and the suite would fail, the tests are pinned to the implementation instead of the behaviour. Loosen them.
+- Prefer one test that exercises a real path over five that each poke one line. Where several inputs test the same behaviour, parametrise rather than copy.
+
+The failure mode this prevents: a suite that grows with every change, passes forever, and never once tells you something is broken.
+
 ## 2. Minimal change
 
 Solve the stated problem with the smallest diff that actually solves it.

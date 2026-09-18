@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-**Read [AGENTS.md](AGENTS.md) first — it holds the working rules for this repo, and they are not repeated here.** The short version: test before implementation, minimal diff, one issue per PR, mark unspecified paper details with `PAPER-GAP:`, keep replay deterministic.
+**Read [AGENTS.md](AGENTS.md) first — it holds the working rules for this repo, and they are not repeated here.** The short version: test before implementation, test behaviour rather than lines, minimal diff, one issue per PR, mark unspecified paper details with `PAPER-GAP:`, keep replay deterministic.
 
 This file only adds the Claude-Code-specific bits.
 
@@ -37,6 +37,7 @@ Issues are phased and each names its blockers. Do not start an issue whose block
 - **Policy code is executed.** `dream.py` runs LLM-written Python. It must stay sandboxed and resource-capped. Never relax that to make a test pass.
 - **Replay generates nothing.** During replay, outcomes are retrieved from the frozen tree only. If you find yourself calling an agent or an evaluator inside the replay path, you've made a mistake.
 - **Scores are task-specific.** Don't assume higher-is-better everywhere without checking the evaluator's contract.
+- **Reading the PDF needs setup.** `pdftotext` and `pdftoppm` are usually absent, and a system-wide `pip install pypdf` can collide with the system `cryptography`. A throwaway venv works: `python -m venv /tmp/pdfvenv && /tmp/pdfvenv/bin/pip install -q pypdf`, then read pages with `PdfReader`.
 
 ## Scope
 
