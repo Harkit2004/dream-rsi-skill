@@ -241,8 +241,21 @@ class OptimalPolicy(ABC):
             if budget is not None:
                 # A backstop only: a policy may return more than it was offered.
                 batch = batch[: budget - spent]
+                self._keep_selected(batch)
             question.reveal(batch)
         return question.result()
+
+    def _keep_selected(self, batch: Sequence[str]) -> None:
+        """Forget the selections a cut took out of the batch before it was revealed.
+
+        What was cut was never asked about, so the world having no continuation
+        for it is not something :meth:`_close_barren` may conclude next round —
+        it would close frontiers on evidence that does not exist.
+        """
+        kept = set(batch)
+        self._selected = {
+            node_id: children for node_id, children in self._selected.items() if node_id in kept
+        }
 
     def _close_barren(self, counts: Mapping[str, int]) -> None:
         """Close last round's selections that the world had no continuation for.

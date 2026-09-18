@@ -85,6 +85,21 @@ class NeverStops(OptimalPolicy):
         return (tree.root_id,)
 
 
+class ProbesEveryFrontier(OptimalPolicy):
+    """Selects every live frontier, however narrow a width it was offered.
+
+    §B.2 caps a batch at ``question.max_parallelism``; a policy that overruns it
+    is what ``solve``'s truncation is a backstop for, and model-written code
+    (issue #13) is where that comes from.
+    """
+
+    def choose(
+        self, tree: DiscoveryTree, live: Sequence[str], width: int
+    ) -> Sequence[str]:
+        leaves = tuple(node_id for node_id in live if node_id != tree.root_id)
+        return leaves or (tree.root_id,) * 3
+
+
 class BoundedQuestion:
     """A ``Question`` that refuses to be driven more than ``limit`` rounds.
 
@@ -382,6 +397,35 @@ def test_a_budget_that_cuts_a_batch_does_not_write_off_the_frontiers_it_cut() ->
     result = BreadthFirstPolicy().solve(run, budget=3)
 
     assert [point.node_id for point in result.curve] == [exhausted.id, live.id, deeper.id]
+
+
+def test_a_batch_cut_by_the_backstop_is_not_recorded_as_selected_either() -> None:
+    """The same rule for the cut a policy's own overrun triggers.
+
+    Offering a narrower width handles a policy that respects it. One that
+    returns more ids than it was offered still has its batch cut, and the ids cut
+    from it were no more asked about than before — so they cannot be closed next
+    round on evidence the world never gave. Here the frontier that gets cut is
+    the only one with anything left behind it, so writing it off strands
+    ``deeper`` and ends the run a node short of its budget.
+    """
+    tree = DiscoveryTree.with_root()
+    first = tree.add_child(tree.root_id, score=1.0)
+    second = tree.add_child(tree.root_id, score=2.0)
+    third = tree.add_child(tree.root_id, score=3.0)
+    deeper = tree.add_child(third.id, score=4.0)
+
+    run = ReplaySimulator(tree).start()
+    run.max_parallelism = 3
+
+    result = ProbesEveryFrontier().solve(run, budget=4)
+
+    assert [point.node_id for point in result.curve] == [
+        first.id,
+        second.id,
+        third.id,
+        deeper.id,
+    ]
 
 
 def test_solve_batches_to_the_width_the_question_offers() -> None:
