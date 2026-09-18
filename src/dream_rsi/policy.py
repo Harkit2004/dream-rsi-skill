@@ -230,10 +230,16 @@ class OptimalPolicy(ABC):
             spent = len(tree) - 1
             if budget is not None and spent >= budget:
                 break
-            batch = tuple(self.select(tree, eligible, width))
+            # Offered as a narrower width rather than cut afterwards: a batch
+            # trimmed after the fact would leave :meth:`select` holding
+            # frontiers nothing asked about, and the next round would close them
+            # as if the world had refused them.
+            room = width if budget is None else min(width, budget - spent)
+            batch = tuple(self.select(tree, eligible, room))
             if not batch:
                 break
             if budget is not None:
+                # A backstop only: a policy may return more than it was offered.
                 batch = batch[: budget - spent]
             question.reveal(batch)
         return question.result()

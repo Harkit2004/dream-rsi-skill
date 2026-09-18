@@ -360,6 +360,30 @@ def test_solve_returns_when_a_policy_stops_getting_anywhere() -> None:
     assert result.stop_reason is None, "solve is not the driver; it sets no stop reason"
 
 
+def test_a_budget_that_cuts_a_batch_does_not_write_off_the_frontiers_it_cut() -> None:
+    """Running out of budget is not evidence about the nodes that were left out.
+
+    ``select`` records what it selected so that next round it can tell which of
+    those the world had no continuation for. Cutting a batch down to the
+    remaining budget *after* that has it record frontiers nothing ever asked
+    about, and the round after a barren reveal then closes them — writing off
+    branches on evidence that does not exist and ending a run with budget still
+    unspent. Here the first branch the world stops at is the one that keeps the
+    run alive long enough for that to show.
+    """
+    tree = DiscoveryTree.with_root()
+    exhausted = tree.add_child(tree.root_id, score=5.0)
+    live = tree.add_child(tree.root_id, score=1.0)
+    deeper = tree.add_child(live.id, score=2.0)
+
+    run = ReplaySimulator(tree).start()
+    run.max_parallelism = 2
+
+    result = BreadthFirstPolicy().solve(run, budget=3)
+
+    assert [point.node_id for point in result.curve] == [exhausted.id, live.id, deeper.id]
+
+
 def test_solve_batches_to_the_width_the_question_offers() -> None:
     """``solve`` reads ``W`` off the question it is driving (§B.2).
 
