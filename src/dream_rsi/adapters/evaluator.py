@@ -23,6 +23,7 @@ and downstream runtime lower-is-better — so every task states its
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -100,6 +101,17 @@ class EvalResult:
     fail_class: str = OK
     error: str | None = None
 
+    def __post_init__(self) -> None:
+        # A NaN score would silently break everything downstream that compares
+        # scores: every comparison against it is false, so it neither wins nor
+        # loses, and ``is_better(nan, None)`` would call it better than a failed
+        # evaluation. The infinities survive comparison but poison Equation 1's
+        # arithmetic, and neither is standard JSON once a tree is written out.
+        # An evaluator that measures one has not measured anything; it should
+        # say so with ``EvalResult.failed``.
+        if self.score is not None and not math.isfinite(self.score):
+            raise ValueError(f"score must be finite or None, got {self.score!r}")
+
     @property
     def evaluated(self) -> bool:
         """Did the evaluation itself succeed? (§B.1 success semantics.)"""
@@ -145,15 +157,24 @@ class TaskEvaluator(Protocol):
     the protocol, no base class and no registration.
     """
 
-    #: Which way :attr:`EvalResult.score` runs for this task.
-    direction: ScoreDirection
+    # Both are read-only: a task's scoring contract is fixed for the task, and
+    # declaring them as properties rather than as writable attributes lets a
+    # frozen implementation — ToyEvaluator is one — conform.
 
-    #: The task's reference score, in the same units and direction as
-    #: :attr:`EvalResult.score`, or ``None`` where the task defines no
-    #: reference. The paper's exploration prompt exposes it as
-    #: ``question.baseline_score`` and the observation helpers compare probes
-    #: against it (§B.1; issue #11).
-    baseline_score: float | None
+    @property
+    def direction(self) -> ScoreDirection:
+        """Which way :attr:`EvalResult.score` runs for this task."""
+        ...
+
+    @property
+    def baseline_score(self) -> float | None:
+        """The task's reference score, or ``None`` where it defines none.
+
+        In the same units and direction as :attr:`EvalResult.score`. The paper's
+        exploration prompt exposes it as ``question.baseline_score``, and the
+        observation helpers compare probes against it (§B.1; issue #11).
+        """
+        ...
 
     def evaluate(self, artifact: str, workspace: Path) -> EvalResult:
         """Check and measure ``artifact`` as produced in ``workspace``."""

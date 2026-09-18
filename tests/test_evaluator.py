@@ -100,6 +100,38 @@ def test_canonical_score_is_larger_is_better():
     assert ScoreDirection.LOWER_IS_BETTER.to_canonical(None) is None
 
 
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_score_is_rejected(score):
+    # NaN compares false against everything, so it would break the strict order
+    # is_better promises; both it and the infinities also serialise as
+    # non-standard JSON and poison the max in Equation 1.
+    with pytest.raises(ValueError, match="finite"):
+        EvalResult(score=score, correct=True)
+
+
+def test_an_evaluator_returning_nan_fails_that_node_only(tmp_path):
+    class NanEvaluator:
+        direction = ScoreDirection.HIGHER_IS_BETTER
+        baseline_score = 0.0
+
+        def evaluate(self, artifact: str, workspace: Path) -> EvalResult:
+            return EvalResult(score=float("nan"), correct=True)
+
+    result = safe_evaluate(NanEvaluator(), "artifact", tmp_path)
+    assert result.evaluated is False
+    assert result.score is None
+    assert result.fail_class == CRASH
+
+
+def test_a_frozen_implementation_satisfies_the_protocol():
+    # ToyEvaluator is a frozen dataclass: the protocol's members have to be
+    # readable, not assignable, or a frozen implementation cannot conform.
+    evaluator: TaskEvaluator = ToyEvaluator()
+    assert isinstance(evaluator, TaskEvaluator)
+    assert evaluator.direction is ScoreDirection.LOWER_IS_BETTER
+    assert evaluator.baseline_score == 10.0
+
+
 def test_a_crashing_evaluator_does_not_kill_the_rollout(tmp_path):
     result = safe_evaluate(CrashingEvaluator(), "artifact", tmp_path)
     assert isinstance(result, EvalResult)
