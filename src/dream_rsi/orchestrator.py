@@ -29,7 +29,7 @@ import json
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -38,6 +38,7 @@ from dream_rsi.adapters.evaluator import EvalResult, TaskEvaluator, safe_evaluat
 from dream_rsi.adapters.fake_agent import FakeAgent
 from dream_rsi.adapters.toy_evaluator import ToyEvaluator
 from dream_rsi.tree import DiscoveryTree, Node
+from dream_rsi.workspace import SnapshotStore
 
 __all__ = [
     "ExplorationPolicy",
@@ -60,6 +61,12 @@ STOP_WALL_CLOCK = "wall_clock"
 
 TREE_FILENAME = "tree.json"
 ROUNDS_FILENAME = "rounds.json"
+STORE_DIRNAME = "store"
+
+# One directory per attempt, named after the attempt's index in the rollout. The
+# paper's exploration prompt has the same shape — "$node_dir is your own attempt
+# directory --- exclude it when scanning sibling attempt_*/ dirs" (§B.1).
+_ATTEMPT_TEMPLATE = "attempt_{:06d}"
 
 
 @dataclass(frozen=True)
@@ -214,20 +221,31 @@ def run_rollout(
     policy: ExplorationPolicy,
     problem: str,
     workspace: Path,
+    snapshots: SnapshotStore | None = None,
     config: RolloutConfig | None = None,
 ) -> Rollout:
     """Run one online rollout and return the tree it recorded.
 
-    ``workspace`` is the root workspace every attempt resumes from. Per-node
-    workspaces and their snapshots are issue #5; until that lands ``snapshot_ref``
-    stays unset and every attempt sees the same directory.
+    ``workspace`` is the root workspace state: the tree's root records a
+    snapshot of it, and every attempt resumes from its own parent's snapshot
+    (§3). With a ``snapshots`` store each attempt gets its own directory, so
+    siblings cannot see each other's files, and the state it leaves behind is
+    recorded as its node's ``snapshot_ref``. Two rollouts must not share a store
+    while they are running — attempt directories are named per rollout — but a
+    finished rollout's snapshots stay readable from the store afterwards.
+
+    Without a store, ``snapshot_ref`` stays unset and every attempt is handed
+    ``workspace`` itself, which is only sound for a task whose agent and
+    evaluator touch no files (the toy task in this repo is one).
 
     ``agent`` and ``evaluator`` are called from up to ``config.workers`` threads
     at once, so an adapter that keeps state has to tolerate that. The two shipped
     in this repo are stateless.
     """
     config = config or RolloutConfig()
-    tree = DiscoveryTree.with_root()
+    tree = DiscoveryTree.with_root(
+        snapshot_ref=None if snapshots is None else snapshots.capture(workspace)
+    )
     rounds: list[RoundRecord] = []
     deadline = None if config.max_seconds is None else time.monotonic() + config.max_seconds
     attempts = 0
@@ -255,21 +273,30 @@ def run_rollout(
             # instead of leaving it unused. The round still records the width the
             # policy asked for.
             scheduled = batch if remaining is None else batch[:remaining]
-            contexts = [
-                _context(tree, parent_id, problem, workspace, config.seed + attempts + offset)
+            jobs = [
+                (
+                    _context(tree, parent_id, problem, workspace, config.seed + attempts + offset),
+                    tree.node(parent_id).snapshot_ref,
+                    _ATTEMPT_TEMPLATE.format(attempts + offset),
+                )
                 for offset, parent_id in enumerate(scheduled)
             ]
             # Results come back in submission order, so the children are attached
             # in the order the policy selected their parents however the workers
             # interleave.
-            outcomes = list(pool.map(lambda ctx: _attempt(agent, evaluator, ctx), contexts))
+            outcomes = list(
+                pool.map(lambda job: _run_attempt(agent, evaluator, snapshots, *job), jobs)
+            )
 
             produced = []
-            for parent_id, (artifact, result) in zip(scheduled, outcomes, strict=True):
+            for parent_id, (artifact, result, snapshot_ref) in zip(
+                scheduled, outcomes, strict=True
+            ):
                 node = tree.add_child(
                     parent_id,
                     artifact=artifact,
                     observations=_observations(result),
+                    snapshot_ref=snapshot_ref,
                     **result.to_node_fields(evaluator.direction),
                 )
                 produced.append(node.id)
@@ -304,7 +331,11 @@ def _check_batch(batch: Sequence[str], eligible: Sequence[str]) -> None:
 def _context(
     tree: DiscoveryTree, parent_id: str, problem: str, workspace: Path, seed: int
 ) -> AgentContext:
-    """What the agent is given for one attempt resuming from ``parent_id`` (§3)."""
+    """What the agent is given for one attempt resuming from ``parent_id`` (§3).
+
+    ``workspace`` is the rollout's root directory; :func:`_run_attempt` replaces
+    it with this attempt's own checkout when the rollout has a snapshot store.
+    """
     history = _chain(tree, parent_id)
     observations = tuple(obs for node in history for obs in node.observations)
     return AgentContext(
@@ -325,6 +356,32 @@ def _chain(tree: DiscoveryTree, node_id: str) -> tuple[Node, ...]:
         chain.append(node)
         current = node.parent_id
     return tuple(reversed(chain))
+
+
+def _run_attempt(
+    agent: CodingAgent,
+    evaluator: TaskEvaluator,
+    snapshots: SnapshotStore | None,
+    context: AgentContext,
+    base_ref: str | None,
+    name: str,
+) -> tuple[str | None, EvalResult, str | None]:
+    """One attempt in its own workspace, and the snapshot it leaves behind (§3).
+
+    The workspace starts as the parent's saved state, belongs to this attempt
+    alone for as long as it runs, and is captured before it is removed — a
+    failed attempt included, because the state a failure left behind is the
+    outcome its children would resume from, and the paper's policies classify
+    failed branches rather than never seeing them (§B.2).
+
+    A store that cannot record a snapshot stops the rollout rather than
+    recording a node: that is a broken harness, not a failed attempt.
+    """
+    if snapshots is None:
+        return (*_attempt(agent, evaluator, context), None)
+    with snapshots.checkout(base_ref, name) as workspace:
+        outcome = _attempt(agent, evaluator, replace(context, workspace=workspace))
+        return (*outcome, snapshots.capture(workspace))
 
 
 def _attempt(
@@ -381,6 +438,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         policy=FirstEligiblePolicy(),
         problem="write the shortest program that defines solve(values)",
         workspace=workspace,
+        snapshots=SnapshotStore(args.directory / STORE_DIRNAME),
         config=RolloutConfig(workers=args.workers, max_rounds=args.rounds),
     )
     result.save(args.directory)

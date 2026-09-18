@@ -23,6 +23,7 @@ from dream_rsi.orchestrator import (
     run_rollout,
 )
 from dream_rsi.tree import DiscoveryTree
+from dream_rsi.workspace import SnapshotStore
 
 PROBLEM = "write the shortest program that solves it"
 
@@ -95,6 +96,20 @@ class ExplodingAgent:
 
 
 @dataclass(frozen=True)
+class TracingAgent:
+    """Appends the node it resumed from to ``trace.txt`` in its own workspace.
+
+    So the file an attempt leaves behind says which branch produced it, and a
+    workspace that inherited another branch's writes is visible as such.
+    """
+
+    def propose(self, context: AgentContext) -> Artifact:
+        with (context.workspace / "trace.txt").open("a", encoding="utf-8") as handle:
+            handle.write(f"{context.parent.id}\n")
+        return Artifact(content="def solve(values):\n    return sum(values)\n")
+
+
+@dataclass(frozen=True)
 class ExplodingEvaluator:
     """Raises on artifacts it is asked to measure after the first."""
 
@@ -109,13 +124,16 @@ class ExplodingEvaluator:
         return EvalResult(score=1.0, correct=True)
 
 
-def rollout(policy, tmp_path, *, agent=None, evaluator=None, **config):
+def rollout(
+    policy, tmp_path, *, agent=None, evaluator=None, snapshots=None, workspace=None, **config
+):
     return run_rollout(
         agent=agent if agent is not None else FakeAgent(),
         evaluator=evaluator if evaluator is not None else ToyEvaluator(),
         policy=policy,
         problem=PROBLEM,
-        workspace=tmp_path,
+        workspace=tmp_path if workspace is None else workspace,
+        snapshots=snapshots,
         config=RolloutConfig(**config),
     )
 
@@ -273,6 +291,44 @@ def test_the_saved_rollout_reloads_as_a_tree_beside_its_round_log(tmp_path):
         list(round_.produced) for round_ in result.rounds
     ]
     assert [round_["k"] for round_ in log["rounds"]] == [2]
+
+
+def test_a_two_level_tree_replays_its_workspaces_from_disk(tmp_path):
+    # The issue's "done when" (#5): after the run, the recorded tree plus the
+    # snapshot store are enough to put any node's workspace back — which is what
+    # "the parent's saved workspace" means once the rollout is over.
+    store = SnapshotStore(tmp_path / "store")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "problem.txt").write_text(PROBLEM, encoding="utf-8")
+    # Round 0 opens two branches off the root; round 1 refines each of them.
+    policy = ScriptedPolicy(script=((0, 0), (1, 2)))
+
+    result = rollout(
+        policy,
+        tmp_path,
+        agent=TracingAgent(),
+        snapshots=store,
+        workspace=workspace,
+        workers=2,
+        max_rounds=2,
+    )
+    result.save(tmp_path / "run")
+
+    tree = DiscoveryTree.load(tmp_path / "run" / "tree.json")
+    reopened = SnapshotStore(tmp_path / "store")
+    leaves = [node for node in tree.iter_nodes() if not tree.children(node.id)]
+    assert len(leaves) == 2
+    traces = []
+    for leaf in leaves:
+        restored = reopened.materialize(leaf.snapshot_ref, tmp_path / "restored" / leaf.id)
+        # The root workspace reached a grandchild, and the writes along the way
+        # are exactly this branch's — no sibling's, and in order.
+        assert (restored / "problem.txt").read_text(encoding="utf-8") == PROBLEM
+        ancestry = [tree.node(leaf.parent_id).parent_id, leaf.parent_id]
+        assert (restored / "trace.txt").read_text(encoding="utf-8").split() == ancestry
+        traces.append(tuple(ancestry))
+    assert len(set(traces)) == 2
 
 
 def test_module_entrypoint_writes_a_loadable_tree(tmp_path):
