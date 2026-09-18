@@ -26,11 +26,15 @@ __all__ = ["DEFAULT_SCRIPT", "FakeAgent"]
 # different task pass their own script.
 DEFAULT_SCRIPT = (
     "def solve(values):\n    return sum(values)\n",
-    "def solve(values):\n    total = 0\n    for value in values:\n        total += value\n"
-    "    return total\n",
+    (
+        "def solve(values):\n    total = 0\n    for value in values:\n"
+        "        total += value\n    return total\n"
+    ),
     "def solve(values):\n    return sum(v for v in values if v)\n",
-    "def solve(values):\n    acc = 0\n    for value in values:\n        acc = acc + value\n"
-    "    return acc\n",
+    (
+        "def solve(values):\n    acc = 0\n    for value in values:\n"
+        "        acc = acc + value\n    return acc\n"
+    ),
 )
 
 
