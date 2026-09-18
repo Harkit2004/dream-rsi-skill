@@ -27,7 +27,7 @@ from dream_rsi.policy import (
     GreedyBestFirstPolicy,
     OptimalPolicy,
 )
-from dream_rsi.replay import ReplaySimulator
+from dream_rsi.replay import STOP_EMPTY_BATCH, ReplaySimulator
 from dream_rsi.scoring import replay_score
 from dream_rsi.tree import DiscoveryTree, eligible_nodes
 
@@ -312,7 +312,7 @@ def test_the_budget_aware_baseline_spends_what_beta_tells_it_to() -> None:
     patient = _replayed(BudgetAwarePolicy(config={"beta": 2.0}), "wide_shallow")
 
     assert frugal.revealed < patient.revealed
-    assert frugal.stop_reason == "empty_batch", "the frugal policy was stopped, it did not stop"
+    assert frugal.stop_reason == STOP_EMPTY_BATCH, "the frugal policy was stopped, it did not stop"
 
 
 def test_solve_stops_once_the_budget_is_spent() -> None:
