@@ -12,7 +12,28 @@ The coding agent underneath is never modified. All self-improvement happens in t
 
 ## Status
 
-Early. See the [issues](../../issues) for the implementation order — they are phased, and each one names what blocks it.
+Early — nothing is implemented yet. The [issues](../../issues) hold the plan, phased and ordered, and each one names what blocks it. Issues labelled `blocked` have open blockers: don't start them, because the interfaces they depend on aren't settled.
+
+| Phase | What lands | Issues |
+|---|---|---|
+| 0 — Foundations | Tree schema, evaluator and agent protocols | [#1](../../issues/1)–[#3](../../issues/3) |
+| 1 — Record | Orchestrator, workspaces, first real trees | [#4](../../issues/4)–[#6](../../issues/6) |
+| 2 — Replay | Frozen replay world, Equation 1, determinism | [#7](../../issues/7)–[#9](../../issues/9) |
+| 3 — Dream | Policy interface, dreaming sweep, sandbox, refinement, selection | [#10](../../issues/10)–[#15](../../issues/15) |
+| 4 — Loop | The full RSI driver, pool management, cost accounting | [#16](../../issues/16)–[#18](../../issues/18) |
+| 5 — Surface | Skill description, quickstart, grid planning, validation | [#19](../../issues/19)–[#23](../../issues/23) |
+
+Start at [#1](../../issues/1). It defines the data structure everything else reads and writes, so it genuinely has to come first.
+
+## Where this differs from the paper
+
+The reference implementation is unreleased, so wherever the paper is silent this repo makes a choice and marks it:
+
+```bash
+grep -rn "PAPER-GAP:" src/ tests/
+```
+
+[#23](../../issues/23) tracks those, and [#22](../../issues/22) is the standing task to revisit every one of them when the authors publish their code.
 
 ## Layout
 
