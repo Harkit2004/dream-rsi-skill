@@ -253,6 +253,38 @@ def test_a_score_a_trajectory_cannot_hold_is_refused_where_it_enters(score: floa
         ReplaySimulator(DiscoveryTree.with_root(score=score)).replay(StopImmediately())
 
 
+def test_an_observation_a_trajectory_cannot_hold_is_refused_where_it_enters() -> None:
+    """The same contract, for the other thing a reveal copies out of the world.
+
+    ``Node`` checks that ``observations`` is a list and nothing about what is
+    in it, while a round's observations are read back as strings. A tree
+    carrying anything else would replay into a log that could not be decoded.
+    """
+    tree = DiscoveryTree.with_root()
+    tree.add_child(tree.root_id, score=1.0, observations=(17,))
+
+    with pytest.raises(TrajectoryError):
+        ReplaySimulator(tree).replay(OpenOnce())
+
+
+def test_a_hand_stepped_run_records_the_seed_it_was_started_with() -> None:
+    """Stepping by hand, the caller owns the randomness — and the log says which.
+
+    ``start`` is the entry point for driving a replay a round at a time, so a
+    caller who seeds their own decisions and feeds the batches in has a
+    trajectory whose seed is theirs. Recording the default instead would put a
+    seed on the archive that never produced it.
+    """
+    run = ReplaySimulator(_load("wide_shallow")).start(seed=4242)
+    run.reveal((run.revealed.root_id,))
+
+    result = run.result()
+
+    assert result.seed == 4242
+    assert result.round_count == 1
+    assert result.revealed == 1
+
+
 def test_a_stored_trajectory_is_read_and_written_as_standard_json() -> None:
     """The reader's end of that same contract, and the writer's last line of defence.
 

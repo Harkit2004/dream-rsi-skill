@@ -159,6 +159,16 @@ def _score(node: Node) -> float | None:
     return _number(f"score of node {node.id}", node.score)
 
 
+def _observations(node: Node) -> tuple[str, ...]:
+    """What a reveal exposes, as a trajectory can hold it (§3).
+
+    ``Node`` checks that ``observations`` is a list and nothing about what is
+    in it, while a round's observations are read back as strings. Held to the
+    loader's contract here for the same reason as :func:`_score`.
+    """
+    return tuple(_string(f"observation of node {node.id}", text) for text in node.observations)
+
+
 def _detached(node: Node) -> Node:
     """A copy of ``node`` sharing nothing writable with it.
 
@@ -434,9 +444,15 @@ class ReplaySimulator:
         """This node's recorded children, earliest-created first."""
         return self._children.get(node_id, ())
 
-    def start(self) -> ReplayRun:
-        """Begin a replay at ``T^{m,0} = {r}``, to be stepped by hand."""
-        return ReplayRun(self)
+    def start(self, *, seed: int = DEFAULT_SEED) -> ReplayRun:
+        """Begin a replay at ``T^{m,0} = {r}``, to be stepped by hand.
+
+        Stepping by hand, the caller makes the decisions, so seeding them is
+        the caller's job — but the trajectory still records which seed produced
+        it, so ``seed`` passes through rather than defaulting under a caller
+        who seeded their own policy.
+        """
+        return ReplayRun(self, seed=seed)
 
     def replay(
         self,
@@ -592,7 +608,7 @@ class ReplayRun:
                 self._revealed.append(child)
                 seen.add(child)
                 node = self._world._node(child)
-                observations.append(node.observations)
+                observations.append(_observations(node))
                 self._record(index, node)
             revealed.append(child)
 
