@@ -13,6 +13,7 @@ The paper is vendored at [`references/paper/`](references/paper/): the PDF is au
 ## Where things live
 
 - `src/dream_rsi/tree.py` — node + tree schema, persistence. Everything depends on this; change it carefully.
+- `src/dream_rsi/workspace.py` — per-attempt workspaces and the filesystem snapshots nodes point at.
 - `src/dream_rsi/replay.py` — the frozen replay world, prefix-observable reveal.
 - `src/dream_rsi/scoring.py` — Equation 1. Keep it a pure function.
 - `src/dream_rsi/policy.py` — the `OptimalPolicy` interface candidate policies implement.
