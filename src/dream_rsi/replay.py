@@ -58,6 +58,7 @@ __all__ = [
     "ReplayRun",
     "ReplaySimulator",
     "SimResult",
+    "TrajectoryError",
 ]
 
 # Bumped whenever a stored trajectory's layout changes in a way an older reader
@@ -85,6 +86,15 @@ STOP_MAX_ROUNDS = "max_rounds"
 STOP_ALL_REVEALED = "all_revealed"
 
 
+class TrajectoryError(ValueError):
+    """A stored trajectory carries a schema version or a field this code cannot read.
+
+    One catchable type for "this log is not readable", as ``tree.TreeError`` is
+    for a tree, so a dreaming run that walks an archive can tell an unreadable
+    log from a bug in its own inspection code.
+    """
+
+
 def _object(what: str, value: Any) -> dict[str, Any]:
     """Reject a stored trajectory that is not shaped like one.
 
@@ -93,31 +103,31 @@ def _object(what: str, value: Any) -> dict[str, Any]:
     replayed, which is worse than failing to load.
     """
     if not isinstance(value, dict):
-        raise ValueError(f"{what} must be an object, got {type(value).__name__}")
+        raise TrajectoryError(f"{what} must be an object, got {type(value).__name__}")
     return value
 
 
 def _sequence(what: str, value: Any) -> list[Any]:
     if not isinstance(value, list):
-        raise ValueError(f"{what} must be a list, got {type(value).__name__}")
+        raise TrajectoryError(f"{what} must be a list, got {type(value).__name__}")
     return value
 
 
 def _integer(what: str, value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(f"{what} must be an integer, got {value!r}")
+        raise TrajectoryError(f"{what} must be an integer, got {value!r}")
     return value
 
 
 def _string(what: str, value: Any) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{what} must be a string, got {value!r}")
+        raise TrajectoryError(f"{what} must be a string, got {value!r}")
     return value
 
 
 def _number(what: str, value: Any) -> float | None:
     if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
-        raise ValueError(f"{what} must be a number or null, got {value!r}")
+        raise TrajectoryError(f"{what} must be a number or null, got {value!r}")
     return value
 
 
@@ -319,13 +329,13 @@ class SimResult:
         payload = _object("result", payload)
         version = payload.get("schema_version")
         if version != SIM_RESULT_SCHEMA_VERSION:
-            raise ValueError(
+            raise TrajectoryError(
                 f"unreadable trajectory schema version {version!r}; "
                 f"this code reads {SIM_RESULT_SCHEMA_VERSION}"
             )
         stop_reason = payload.get("stop_reason")
         if stop_reason is not None and not isinstance(stop_reason, str):
-            raise ValueError(f"stop_reason must be a string or null, got {stop_reason!r}")
+            raise TrajectoryError(f"stop_reason must be a string or null, got {stop_reason!r}")
         return cls(
             seed=_integer("seed", payload.get("seed")),
             world_size=_integer("world_size", payload.get("world_size")),

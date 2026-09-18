@@ -20,7 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from dream_rsi.replay import SIM_RESULT_SCHEMA_VERSION, ReplaySimulator, SimResult
+from dream_rsi.replay import (
+    SIM_RESULT_SCHEMA_VERSION,
+    ReplaySimulator,
+    SimResult,
+    TrajectoryError,
+)
 from dream_rsi.tree import DiscoveryTree
 
 REPO = Path(__file__).resolve().parents[1]
@@ -127,8 +132,8 @@ def test_replay_is_reproducible_across_interpreter_hash_seeds(name: str) -> None
     """
     script = (
         "import sys\n"
-        "sys.path.insert(0, %r)\n" % str(Path(__file__).parent)
-        + "from test_determinism import _replay\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "from test_determinism import _replay\n"
         "print(_replay(sys.argv[1]).to_json())\n"
     )
     outputs = set()
@@ -182,7 +187,7 @@ def test_a_trajectory_this_code_cannot_read_is_refused_rather_than_guessed(
     """
     payload = {**_replay("narrow_deep").to_dict(), **damage}
 
-    with pytest.raises(ValueError):
+    with pytest.raises(TrajectoryError):
         SimResult.from_dict(payload)
 
 
