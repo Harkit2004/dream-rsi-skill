@@ -346,6 +346,7 @@ class BudgetAwarePolicy(OptimalPolicy):
     """
 
     def reset(self, rng: random.Random | None = None) -> None:
+        """Also forget what this rollout had found and how long ago it improved."""
         super().reset(rng)
         self._best: float | None = None
         # Unset until the first decision, so a policy handed a world someone
