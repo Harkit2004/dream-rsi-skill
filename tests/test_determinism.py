@@ -11,6 +11,7 @@ noise.
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import subprocess
@@ -83,6 +84,27 @@ class OpenThenProbe:
         if self._round <= 3:
             return (tree.root_id,)
         return (eligible[1], eligible[-1])
+
+
+@dataclass
+class OpenOnce:
+    """Opens one branch off the root, then stops."""
+
+    _done: bool = False
+
+    def select(self, tree: DiscoveryTree, eligible: tuple[str, ...], width: int) -> tuple[str, ...]:
+        if self._done:
+            return ()
+        self._done = True
+        return (tree.root_id,)
+
+
+@dataclass
+class StopImmediately:
+    """Selects nothing, ending the replay with the root alone revealed."""
+
+    def select(self, tree: DiscoveryTree, eligible: tuple[str, ...], width: int) -> tuple[str, ...]:
+        return ()
 
 
 def _replay(name: str, *, seed: int = 11) -> SimResult:
@@ -189,6 +211,72 @@ def test_a_trajectory_this_code_cannot_read_is_refused_rather_than_guessed(
 
     with pytest.raises(TrajectoryError):
         SimResult.from_dict(payload)
+
+
+def test_a_round_whose_columns_do_not_line_up_is_refused() -> None:
+    """``selected``, ``revealed`` and ``observations`` align pairwise or the log is junk.
+
+    Every consumer reads a round by position — which selection revealed what,
+    and what that exposed. A stored round with more selections than reveals
+    silently drops the last one from every ``zip`` that walks it, and reports a
+    decision round that cost less than it did.
+    """
+    payload = _replay("wide_shallow").to_dict()
+    payload["rounds"][0]["selected"] = [*payload["rounds"][0]["selected"], "n000000"]
+
+    with pytest.raises(TrajectoryError):
+        SimResult.from_dict(payload)
+
+
+def test_a_non_finite_score_never_reaches_a_stored_trajectory() -> None:
+    """NaN and infinity are not scores, and ``NaN`` is not JSON either.
+
+    A NaN stays the running best forever, because every comparison against it
+    is false, and an infinite attainment is rejected outright by
+    ``scoring.replay_score``. Worse, Python writes both as bare ``NaN`` and
+    ``Infinity`` tokens that no other JSON reader accepts, so an archive
+    carrying one is not the portable record this claims to be.
+    """
+    payload = _replay("narrow_deep").to_dict()
+    payload["curve"][0]["best_score"] = math.inf
+
+    with pytest.raises(TrajectoryError):
+        SimResult.from_dict(payload)
+
+    tree = DiscoveryTree.with_root()
+    tree.add_child(tree.root_id, score=math.nan)
+    result = ReplaySimulator(tree).replay(OpenOnce()).result()
+
+    with pytest.raises(ValueError):
+        result.to_json()
+
+
+def test_a_scored_root_counts_toward_attainment() -> None:
+    """Equation 1 maximises over a subtree that always contains the root (§3).
+
+    The root is the initial workspace state and normally carries no ``s_v``,
+    but the schema lets it carry one, and a replay starts with it revealed. A
+    policy that stops immediately has still attained whatever the root scored;
+    reporting ``None`` would send that replay into ``replay_score`` as ``-inf``,
+    below every rival, for a world where something was in fact attained.
+    """
+    tree = DiscoveryTree.with_root(score=9.0)
+    tree.add_child(tree.root_id, score=4.0)
+
+    stopped = ReplaySimulator(tree).replay(StopImmediately()).result()
+
+    assert stopped.round_count == 0
+    assert stopped.revealed == 0
+    assert stopped.attainment == 9.0
+
+    walked = ReplaySimulator(tree).replay(OpenOnce()).result()
+
+    # The root is not an attempt, so it is no curve point and no revealed node —
+    # but it is still the best thing the replay has seen.
+    assert walked.revealed == 1
+    assert [point.score for point in walked.curve] == [4.0]
+    assert [point.best_score for point in walked.curve] == [9.0]
+    assert walked.attainment == 9.0
 
 
 def test_the_trajectory_records_what_each_round_selected_revealed_and_exposed() -> None:

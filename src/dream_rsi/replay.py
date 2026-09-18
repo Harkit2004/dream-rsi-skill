@@ -39,6 +39,7 @@ takes its generator from the seed the replay was started with.
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -126,8 +127,20 @@ def _string(what: str, value: Any) -> str:
 
 
 def _number(what: str, value: Any) -> float | None:
-    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+    """A score, or nothing — and never a NaN or an infinity.
+
+    ``json.loads`` decodes the bare ``NaN`` and ``Infinity`` tokens Python
+    writes, so a stored trajectory can carry either. Neither is a score a
+    replay could have produced: a NaN stays the running best forever, because
+    every comparison against it is false, and ``scoring.replay_score`` rejects
+    an infinite attainment outright.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TrajectoryError(f"{what} must be a number or null, got {value!r}")
+    if not math.isfinite(value):
+        raise TrajectoryError(f"{what} must be a finite number, got {value!r}")
     return value
 
 
@@ -210,7 +223,7 @@ class ReplayRound:
     @classmethod
     def from_dict(cls, payload: Any) -> ReplayRound:
         payload = _object("round", payload)
-        return cls(
+        round_ = cls(
             index=_integer("round index", payload.get("index")),
             selected=tuple(
                 _string("round selected", raw)
@@ -228,6 +241,17 @@ class ReplayRound:
                 for group in _sequence("round observations", payload.get("observations"))
             ),
         )
+        widths = {len(round_.selected), len(round_.revealed), len(round_.observations)}
+        if len(widths) != 1:
+            # The three columns are read by position everywhere. A stored round
+            # whose columns differ in length silently drops the odd one out of
+            # every zip that walks it, and describes a decision round that cost
+            # less than the one that ran.
+            raise TrajectoryError(
+                f"round {round_.index} does not line up: {len(round_.selected)} selected, "
+                f"{len(round_.revealed)} revealed, {len(round_.observations)} observations"
+            )
+        return round_
 
 
 @dataclass(frozen=True)
@@ -292,6 +316,7 @@ class SimResult:
     seed: int
     world_size: int
     stop_reason: str | None
+    attainment: float | None
     rounds: tuple[ReplayRound, ...]
     curve: tuple[CurvePoint, ...]
 
@@ -305,24 +330,27 @@ class SimResult:
         """``k_i^{m,★}``: completed rounds at termination."""
         return len(self.rounds)
 
-    @property
-    def attainment(self) -> float | None:
-        """``max_v s_v`` over the revealed subtree, ``None`` if nothing scored."""
-        return self.curve[-1].best_score if self.curve else None
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": SIM_RESULT_SCHEMA_VERSION,
             "seed": self.seed,
             "world_size": self.world_size,
             "stop_reason": self.stop_reason,
+            "attainment": self.attainment,
             "rounds": [round_.to_dict() for round_ in self.rounds],
             "curve": [point.to_dict() for point in self.curve],
         }
 
     def to_json(self) -> str:
-        """The canonical serialisation: sorted keys, so the bytes are the record."""
-        return json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+        """The canonical serialisation: sorted keys, so the bytes are the record.
+
+        ``allow_nan=False`` because Python writes a non-finite score as a bare
+        ``NaN`` or ``Infinity`` token that no other JSON reader accepts. A
+        trajectory that cannot be read back by something other than this module
+        is not the portable archive a dreaming run is inspected from, so a
+        world carrying such a score fails here rather than on whoever reads it.
+        """
+        return json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False) + "\n"
 
     @classmethod
     def from_dict(cls, payload: Any) -> SimResult:
@@ -340,6 +368,7 @@ class SimResult:
             seed=_integer("seed", payload.get("seed")),
             world_size=_integer("world_size", payload.get("world_size")),
             stop_reason=stop_reason,
+            attainment=_number("attainment", payload.get("attainment")),
             rounds=tuple(
                 ReplayRound.from_dict(raw) for raw in _sequence("rounds", payload.get("rounds"))
             ),
@@ -465,7 +494,12 @@ class ReplayRun:
         self._revealed: list[str] = [world.root_id]
         self._rounds: list[ReplayRound] = []
         self._curve: list[CurvePoint] = []
-        self._best: float | None = None
+        # Equation 1 maximises over a subtree that always contains the root
+        # (§3), and a replay starts with the root revealed. The root is the
+        # initial workspace state and normally carries no ``s_v``, but the
+        # schema permits one, and where it has one a policy has attained it
+        # before making a single decision.
+        self._best: float | None = world._node(world.root_id).score
         self._stop_reason: str | None = None
 
     @property
@@ -502,6 +536,7 @@ class ReplayRun:
             seed=self._seed,
             world_size=len(self._world),
             stop_reason=self._stop_reason,
+            attainment=self._best,
             rounds=self.rounds,
             curve=self.curve,
         )
