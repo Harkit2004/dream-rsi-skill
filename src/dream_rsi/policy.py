@@ -111,8 +111,11 @@ class OptimalPolicy(ABC):
 
     A policy carries state only for the length of one rollout (§3: replay
     "resets the policy's per-rollout state" before each policy-world pair).
-    Replay calls :meth:`reset` before the first decision; an online caller
-    reusing one instance for a second rollout has to call it too.
+    Replay calls :meth:`reset` before the first decision, and :meth:`select`
+    resets itself when what it is shown is a rollout starting, so one instance
+    can drive a second rollout either way. A caller holding a seed still calls
+    :meth:`reset` with it, because a self-reset has no seed to pass on — which
+    is why the online driver should own this too (issue #36).
     """
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:
@@ -150,6 +153,14 @@ class OptimalPolicy(ABC):
         Only the world running out of recorded continuations closes anything,
         which nothing can reopen.
         """
+        if len(tree) == 1 and (self._selected or self._closed):
+            # A tree holding only the root is a rollout starting (§3's
+            # ``T^{m,0} = {r}``), so anything still held belongs to one that has
+            # finished. Replay resets us itself; the online driver does not
+            # (issue #36), and carrying a closure across would read the root as
+            # a frontier the world refused, filter out the only legal action,
+            # and end that rollout without a single attempt.
+            self.reset()
         counts = _child_counts(tree)
         self._close_barren(counts)
         live = tuple(node_id for node_id in eligible if node_id not in self._closed)
