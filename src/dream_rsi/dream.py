@@ -150,6 +150,19 @@ class DreamConfig:
         if self.workers < 1:
             raise ValueError(f"workers must be at least 1, got {self.workers}")
 
+    @property
+    def conditions(self) -> tuple[int, int | None, int, ReplayWeights]:
+        """Everything a ``V_i^m`` depends on, which is everything but ``workers``.
+
+        What two versions have to share to be comparable at all, and so what
+        :func:`select` holds an incumbent's floor to. ``workers`` is left out
+        because it cannot move a score (see the module docstring); the rest each
+        can, so a version offered a different ``W``, capped at a different
+        ``K₂``, seeded differently or scored under different ``β`` was not
+        evaluated against its rivals.
+        """
+        return (self.width, self.max_rounds, self.seed, self.weights)
+
 
 @dataclass(frozen=True)
 class WorldReplay:
@@ -196,11 +209,20 @@ class VersionReport:
     (issue #15), which is the same treatment the incumbent floor gives anything
     that fails to beat ``V^0``. Revisit if the authors' implementation lands (see
     references/method.md).
+
+    ``config`` is what this row was replayed under, carried per version rather
+    than only on the round: a :class:`DreamReport` can be assembled out of rows
+    that :func:`dream` scored separately (``develop.DevelopmentReport``
+    comparison is), and a row is only comparable with the others if it was
+    scored under their conditions. It is what :func:`select` checks before it
+    holds anything to an incumbent's floor, and it stays out of
+    :meth:`to_dict`, where the round's own ``config`` already reports it.
     """
 
     name: str
     score: float | None
     replays: tuple[WorldReplay, ...]
+    config: DreamConfig
 
     @property
     def failures(self) -> tuple[WorldReplay, ...]:
@@ -415,7 +437,7 @@ def dream(
     # One row of the grid per version, ``len(worlds)`` cells wide.
     stride = len(worlds)
     versions = tuple(
-        _aggregate(candidate.name, tuple(replayed[index * stride : (index + 1) * stride]))
+        _aggregate(candidate.name, tuple(replayed[index * stride : (index + 1) * stride]), config)
         for index, candidate in enumerate(candidates)
     )
     return DreamReport(
@@ -434,12 +456,13 @@ def select(report: DreamReport, *, incumbent: str | None = None) -> Selection:
     ``V^{m⋆} ≥ V^0``." The floor is therefore not a rule applied on top of the
     argmax — it *is* the argmax, as long as the incumbent is one of the versions
     being compared and every version was scored on the same history under the
-    same conditions. Both are checked here rather than assumed: a grid is one
-    pool and one :class:`DreamConfig` by construction (:func:`dream`), but
-    ``develop.DevelopmentReport.comparison`` assembles one out of per-version
-    reports, so a row scored over an earlier, smaller pool is an assembly away
-    — and comparing today's candidates against yesterday's ``V^0`` would leave
-    the guarantee holding over a history nobody replays any more.
+    same conditions. All three are checked here rather than assumed: one
+    :func:`dream` sweep is one pool and one :class:`DreamConfig` by
+    construction, but ``develop.DevelopmentReport.comparison`` assembles a
+    report out of per-version sweeps, so a row scored over an earlier, smaller
+    pool — or at another ``W`` — is an assembly away, and comparing today's
+    candidates against a ``V^0`` from elsewhere would leave the guarantee
+    holding over a round nobody ran.
 
     ``incumbent`` names ``π_t^0``; it defaults to the first version of the
     report, which is the order §3 develops them in and the order
@@ -458,6 +481,12 @@ def select(report: DreamReport, *, incumbent: str | None = None) -> Selection:
             raise ValueError(
                 f"version {version.name!r} was scored on {list(scored)}, not on this round's "
                 f"pool {list(report.worlds)}; a V^m from another history is not comparable"
+            )
+        if version.config.conditions != report.config.conditions:
+            raise ValueError(
+                f"version {version.name!r} was scored under {_conditions(version.config)}, "
+                f"not this round's {_conditions(report.config)}; a V^m from other "
+                f"conditions is not comparable"
             )
 
     floor = by_name[name]
@@ -533,6 +562,14 @@ def _rationale(report: DreamReport, winner: VersionReport, floor: VersionReport)
     )
 
 
+def _conditions(config: DreamConfig) -> str:
+    """The replay conditions a version was scored under, for a refusal message."""
+    return (
+        f"W={config.width} K₂={config.max_rounds} seed={config.seed} "
+        f"β₁={config.weights.cost} β₂={config.weights.parallelism}"
+    )
+
+
 def _number(score: float | None) -> str:
     """A ``V^m`` as the log states it; ``none`` where the version scored none."""
     return "none" if score is None else f"{score:.4f}"
@@ -587,14 +624,21 @@ def _replay(candidate: PolicyCandidate, world: ReplayWorld, config: DreamConfig)
     return WorldReplay(world=world.name, score=score, result=result)
 
 
-def _aggregate(name: str, replays: tuple[WorldReplay, ...]) -> VersionReport:
+def _aggregate(
+    name: str, replays: tuple[WorldReplay, ...], config: DreamConfig
+) -> VersionReport:
     """``V^m = (1/t) Σ_i V_i^m`` over one version's row, or nothing if a world failed."""
     scores = [replay.score for replay in replays]
     if any(score is None for score in scores):
-        return VersionReport(name=name, score=None, replays=replays)
+        return VersionReport(name=name, score=None, replays=replays, config=config)
     # Summed in history order, so the floating-point result is the same every
     # run whatever order the cells were replayed in.
-    return VersionReport(name=name, score=math.fsum(scores) / len(scores), replays=replays)
+    return VersionReport(
+        name=name,
+        score=math.fsum(scores) / len(scores),
+        replays=replays,
+        config=config,
+    )
 
 
 def _rank_key(item: tuple[int, VersionReport]) -> tuple[int, float, int]:

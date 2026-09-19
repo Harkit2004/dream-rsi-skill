@@ -510,31 +510,65 @@ def test_the_rationale_records_which_version_won_and_by_how_much() -> None:
 
 
 @pytest.mark.parametrize(
-    ("incumbent", "match"),
+    ("odd_row", "incumbent", "match"),
     [
-        pytest.param("nobody", r"nobody.*not one of the versions", id="absent"),
-        pytest.param(None, r"scored on .*early_payoff.*not on this round", id="stale"),
+        pytest.param("pool", "nobody", r"nobody.*not one of the versions", id="absent"),
+        pytest.param("pool", None, r"scored on .*early_payoff.*not on this round", id="pool"),
+        pytest.param("conditions", None, r"scored under W=1 .*not this round's", id="conditions"),
     ],
 )
 def test_a_selection_that_could_not_hold_the_floor_is_refused(
-    incumbent: str | None, match: str
+    odd_row: str, incumbent: str | None, match: str
 ) -> None:
-    """The two ways the floor silently stops being one (issue #15).
+    """The three ways the floor silently stops being one (issue #15).
 
     Naming an incumbent the round never scored leaves nothing to be no worse
-    than. The second is the failure the issue calls out: a report assembled with
-    a version report from an earlier, smaller pool — ``develop`` builds its
-    comparison out of per-version reports, so this is an assembly away — would
-    compare today's candidates against a score earned somewhere else, and the
-    guarantee would quietly be about nothing.
+    than. The other two are the failure the issue calls out — ``develop`` builds
+    its comparison out of per-version reports, so a row from another round is an
+    assembly away — in its two forms: §3 evaluates the versions "on the same
+    ``t`` replay worlds", and Equation 1's ``V_i^m`` is a function of ``W`` and
+    the ``β`` as well. A row from an earlier, smaller pool or from a sweep run
+    at another width is not a rival score, and comparing one against it would
+    leave the guarantee quietly about nothing.
     """
-    stale = dream((_opener("v0", 1),), (_early(),)).versions[0]
-    fresh = dream((_opener("v1", 3),), (_early(), _late())).versions[0]
+    pool = (_early(), _late())
+    config = DreamConfig(width=3)
+    if odd_row == "pool":
+        odd = dream((_opener("v0", 1),), pool[:1], config=config).versions[0]
+    else:
+        odd = dream((_opener("v0", 1),), pool, config=DreamConfig(width=1)).versions[0]
+    fresh = dream((_opener("v1", 3),), pool, config=config).versions[0]
     report = DreamReport(
-        versions=(stale, fresh),
+        versions=(odd, fresh),
         worlds=("early_payoff", "late_payoff"),
-        config=DreamConfig(),
+        config=config,
     )
 
     with pytest.raises(ValueError, match=match):
         select(report, incumbent=incumbent)
+
+
+def test_versions_replayed_at_different_parallelism_settings_are_still_rivals() -> None:
+    """``workers`` is not one of the conditions a comparison is held to.
+
+    How much of a grid ran at once cannot move a number in it — the harness
+    asserts that above — so rows swept at different parallelism settings are
+    rivals like any others. A selection that held them to the whole
+    ``DreamConfig`` would refuse a round whose incumbent happened to be scored
+    on a quieter machine than its revisions, which is a property of the machine
+    and of nothing in §3.
+    """
+    pool = (_early(), _late())
+    rows = tuple(
+        dream(
+            (_opener(name, branches),), pool, config=DreamConfig(width=3, workers=workers)
+        ).versions[0]
+        for name, branches, workers in (("v0", 1, 1), ("v1", 3, 4))
+    )
+    report = DreamReport(
+        versions=rows,
+        worlds=("early_payoff", "late_payoff"),
+        config=DreamConfig(width=3),
+    )
+
+    assert select(report).winner == "v1"
