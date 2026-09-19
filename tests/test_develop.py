@@ -224,6 +224,30 @@ def test_a_policy_renamed_through_name_is_accepted() -> None:
     assert validate_source(source) is None
 
 
+def test_a_reassigned_name_is_read_the_way_the_sandbox_reads_it() -> None:
+    """``NAME`` bound twice: the last binding is the class, as at runtime.
+
+    ``_sandbox_child._load_policy`` does ``namespace.get("NAME", ...)`` *after*
+    executing the module, so the final binding is the one it looks for. A check
+    that stops at the first assignment refuses a version the sandbox would have
+    loaded, and burns an attempt doing it. Both directions, because a check that
+    gave up whenever ``NAME`` appears twice would pass the first assert alone.
+    """
+    body = (
+        "class Actual:\n"
+        "    def __init__(self, config=None):\n"
+        "        self.config = dict(config or {})\n"
+        "\n"
+        "    def select(self, tree, eligible, width):\n"
+        "        return ()\n"
+    )
+    accepted = 'NAME = "Stale"\nNAME = "Actual"\n\n\n' + body
+    refused = 'NAME = "Actual"\nNAME = "Stale"\n\n\n' + body
+
+    assert validate_source(accepted) is None
+    assert "Stale" in (validate_source(refused) or "")
+
+
 def test_a_rejected_revision_is_fed_back_to_the_next_attempt(tmp_path: Path) -> None:
     """A rejection is information (issue #14): the next attempt is shown it.
 

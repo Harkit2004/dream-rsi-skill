@@ -363,20 +363,29 @@ def _declared_name(module: ast.Module, default: str) -> str | None:
     §B.2's ``NAME = "OptimalPolicy"`` is the paper's hook for renaming the policy
     class, and ``_sandbox_child._load_policy`` reads it. A module that computes
     it instead is legal and unreadable from here.
+
+    ``_load_policy`` does ``namespace.get("NAME", ...)`` once the module has been
+    executed, so where a module binds ``NAME`` more than once it is the *last*
+    binding the sandbox will look for. Read every one and keep the last, or the
+    check refuses a version over a name nothing will ask for.
     """
+    name: str | None = default
     for node in module.body:
         if isinstance(node, ast.Assign):
             targets = node.targets
-        elif isinstance(node, ast.AnnAssign):
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            # A bare ``NAME: str`` annotates without binding anything, so it
+            # leaves whatever the sandbox would find as it was.
             targets = [node.target]
         else:
             continue
         if not any(isinstance(target, ast.Name) and target.id == "NAME" for target in targets):
             continue
         if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            return node.value.value
-        return None
-    return default
+            name = node.value.value
+        else:
+            name = None
+    return name
 
 
 def _replays_text(report: VersionReport) -> str:
