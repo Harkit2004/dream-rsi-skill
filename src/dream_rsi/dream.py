@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -429,7 +429,7 @@ def _cell(score: float | None, error: str | None = None) -> str:
     return f"{score:.4f}"
 
 
-def _check_unique(what: str, names: Any) -> None:
+def _check_unique(what: str, names: Iterable[str]) -> None:
     """Refuse a grid whose rows or columns cannot be told apart in the report."""
     seen: set[str] = set()
     for name in names:
