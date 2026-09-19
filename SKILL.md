@@ -24,7 +24,7 @@ One cycle `t`, as `dream_rsi.run` drives it:
 1. **Online rollout.** Deploy the current policy `π_t`. The orchestrator branches, runs `W` workers in parallel over at most `K₁` decision rounds, and records every attempt as a node. Result: discovery tree `T_t`.
 2. **Grow the pool.** Append `T_t` to the history `H_t`. The pool is a directory of recorded trees, so a run started tomorrow dreams over every tree the runs before it recorded.
 3. **Dream and refine — one interleaved pass.** Version `v0` is the incumbent itself, replayed over every world in `H_t` and scored. The policy-development agent then reads `v0`'s replay trajectories and scores and rewrites the policy's Python into `v1`, which is scored on the same worlds under the same conditions, and so on up to `M` versions. Replay makes no agent calls and no evaluator calls — outcomes are retrieved from the recording.
-4. **Select and redeploy.** Take the highest-scoring version, with the incumbent as a strict floor: a version that only ties `V⁰` does not displace it. The winner is `π_{t+1}`, and the next cycle deploys it.
+4. **Select and redeploy.** Take the highest-scoring version. Where the incumbent has a `V⁰`, that score is a strict floor: a version merely tying it does not displace it. Where the incumbent scored nothing on this history there is no floor to clear, so a version that did score wins. The winner is `π_{t+1}`, and the next cycle deploys it.
 
 Dreaming and refining are not two passes over the history, one after the other — each version is written *from* the previous one's replay feedback, which is why step 3 is a single call in the code.
 
