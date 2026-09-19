@@ -52,6 +52,7 @@ rather than dreaming over a history shorter than its own records claim.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import shutil
@@ -89,6 +90,7 @@ __all__ = [
     "POOL_DIRNAME",
     "RECORD_FILENAME",
     "TIMING_FILENAME",
+    "TOY_REVISIONS",
     "CycleRecord",
     "Run",
     "RunConfig",
@@ -136,13 +138,36 @@ TOY_SCRIPT = (
 # π_1 for a run that is not handed one: the §B.2 shape, "keep NAME =
 # "OptimalPolicy" and implement class OptimalPolicy(...)", over a baseline the
 # package already ships. A real run supplies its own.
+#
+# Breadth-first deliberately: it is §4's Recursive Fixed Exploration, the
+# paper's own controlled baseline — "10 parallel workspaces with up to 11
+# refinement steps", a grid opened whatever it finds — so a run that starts
+# there and improves on it is the comparison the paper reports. It is also the
+# baseline with the most room above it, since Equation 1 charges it for every
+# node of that grid. Starting from a policy nothing on offer can beat is a loop
+# that runs correctly and demonstrates nothing (issue #20).
 DEFAULT_POLICY_SOURCE = """\
-from dream_rsi.policy import GreedyBestFirstPolicy
+from dream_rsi.policy import BreadthFirstPolicy
 
 
-class OptimalPolicy(GreedyBestFirstPolicy):
+class OptimalPolicy(BreadthFirstPolicy):
     pass
 """
+
+# What the stub development agent offers against it: §B.2's "dynamic portfolio",
+# at the three settings of the one knob a version exposes. It is a different
+# strategy rather than the baseline retuned — it batches *and* stops once
+# revealing more has stopped improving the best score — so the cost term of
+# Equation 1 has something to prefer.
+TOY_REVISIONS = tuple(
+    "from dream_rsi.policy import BudgetAwarePolicy\n"
+    "\n"
+    "\n"
+    "class OptimalPolicy(BudgetAwarePolicy):\n"
+    "    def __init__(self, config=None):\n"
+    f"        super().__init__({{'beta': {beta}}})\n"
+    for beta in (0.5, 1.0, 2.0)
+)
 
 
 class RunError(ValueError):
@@ -276,9 +301,16 @@ class Run:
     costs to dream over (issue #17). They describe the store, not the round: a
     cycle that subsampled dreamed over the worlds its own record names, while
     the pool keeps every tree for the runs that come after.
+
+    ``policies`` is ``π_1 … π_T``, the source each cycle actually deployed, and
+    ``policy`` is ``π_{T+1}`` — what the last cycle selected and a resumed run
+    would deploy next. The two together are the whole chain, which is what lets
+    the report show the code the loop rewrote rather than only the scores it
+    rewrote it by (issue #20).
     """
 
     cycles: tuple[CycleRecord, ...]
+    policies: tuple[str, ...]
     policy: str
     pool: tuple[str, ...]
     stats: PoolStats
@@ -295,17 +327,14 @@ class Run:
         """
         directory = Path(directory)
         cycles = directory / CYCLES_DIRNAME
-        records = tuple(record for _, record in _finished(cycles))
+        finished = _finished(cycles)
         pool = SimulatorPool(directory / POOL_DIRNAME)
         # A run with no finished cycle never selected anything, so there is no π
         # it would deploy next; π_1 was the caller's and is not on disk.
-        policy = (
-            _read(_cycle_dir(cycles, records[-1].index) / NEXT_POLICY_FILENAME)
-            if records
-            else ""
-        )
+        policy = _read(finished[-1][0] / NEXT_POLICY_FILENAME) if finished else ""
         return cls(
-            cycles=records,
+            cycles=tuple(record for _, record in finished),
+            policies=tuple(_read(path / POLICY_FILENAME) for path, _ in finished),
             policy=policy,
             pool=pool.names(),
             stats=pool.stats(),
@@ -403,8 +432,47 @@ class Run:
                     f"  cycle {record.index}: {record.selection.rationale}"
                     for record in self.cycles
                 ),
+                "",
+                "policy:",
+                *self._diffs(),
             ]
         return "\n".join(lines) + "\n"
+
+    def _diffs(self) -> list[str]:
+        """What each cycle did to the deployed policy's source (issue #20).
+
+        The rationale above says which version won and by how much; this says
+        what winning *changed*, which is the part that makes Dream-RSI click —
+        the policy is a module the development agent rewrote, not a parameter it
+        retuned. Cycle ``t``'s entry diffs what it deployed against what the
+        cycle after it deploys, and the last against ``π_{T+1}``, so every entry
+        is one cycle's own doing.
+
+        A retained version is a line and not an empty hunk: the loop guarantees
+        ``π_{t+1}`` is no worse than ``π_t`` (§3) and holding still is the
+        ordinary way that happens.
+        """
+        # π_2 … π_{T+1}: what each cycle handed the one after it, the last of
+        # them being the selection no cycle of this run got to deploy.
+        next_up = (*self.policies[1:], self.policy)
+        lines: list[str] = []
+        for record, before, after in zip(self.cycles, self.policies, next_up, strict=True):
+            if before == after:
+                lines.append(f"  cycle {record.index}: unchanged")
+                continue
+            selection = record.selection
+            lines.append(f"  cycle {record.index}: {selection.incumbent} -> {selection.winner}")
+            lines += [
+                f"    {line}"
+                for line in difflib.unified_diff(
+                    before.splitlines(),
+                    after.splitlines(),
+                    fromfile=f"{CYCLE_TEMPLATE.format(record.index)}/{POLICY_FILENAME}",
+                    tofile=f"{CYCLE_TEMPLATE.format(record.index)}/{NEXT_POLICY_FILENAME}",
+                    lineterm="",
+                )
+            ]
+        return lines
 
 
 def run_cycles(
@@ -442,9 +510,10 @@ def run_cycles(
     cycles.mkdir(parents=True, exist_ok=True)
     pool = SimulatorPool(Path(directory) / POOL_DIRNAME)
 
-    records, source = _resume(cycles, config.cycles, policy, pool)
+    records, deployed, source = _resume(cycles, config.cycles, policy, pool)
     history = [record.world for record in records]
     for index in range(len(records), config.cycles):
+        deployed.append(source)
         record, source = _cycle(
             index,
             agent=agent,
@@ -460,13 +529,19 @@ def run_cycles(
         )
         records.append(record)
         history.append(record.world)
-    return Run(cycles=tuple(records), policy=source, pool=pool.names(), stats=pool.stats())
+    return Run(
+        cycles=tuple(records),
+        policies=tuple(deployed),
+        policy=source,
+        pool=pool.names(),
+        stats=pool.stats(),
+    )
 
 
 def _resume(
     cycles: Path, wanted: int, policy: str, pool: SimulatorPool
-) -> tuple[list[CycleRecord], str]:
-    """The cycles already finished under ``cycles``, and what the next one deploys.
+) -> tuple[list[CycleRecord], list[str], str]:
+    """The cycles already finished under ``cycles``, what each deployed, and what is next.
 
     Read in order and stopped at the first gap: a cycle with no record did not
     finish, and every cycle after it was run under a policy that cycle was
@@ -481,13 +556,18 @@ def _resume(
     be worse still.
     """
     records: list[CycleRecord] = []
+    deployed: list[str] = []
     source = policy
     for directory, record in _finished(cycles, wanted):
         records.append(record)
+        # What that cycle deployed, read back rather than reconstructed: on a
+        # resume the sources this session was handed start at the first cycle it
+        # runs, and a report is of the whole run.
+        deployed.append(_read(directory / POLICY_FILENAME))
         if not pool.holds(record.world):
             pool.add(record.world, _tree(directory / TREE_FILENAME))
         source = _read(directory / NEXT_POLICY_FILENAME)
-    return records, source
+    return records, deployed, source
 
 
 def _finished(cycles: Path, wanted: int | None = None) -> list[tuple[Path, CycleRecord]]:
@@ -738,7 +818,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     run = run_cycles(
         agent=ToySearchAgent(script=TOY_SCRIPT),
         evaluator=ToySearchEvaluator(),
-        developer=FakeDeveloper(),
+        developer=FakeDeveloper(script=TOY_REVISIONS),
         policy=DEFAULT_POLICY_SOURCE,
         problem=TOY_PROBLEM,
         directory=args.directory,

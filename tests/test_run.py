@@ -542,6 +542,34 @@ def test_the_report_renders_from_a_run_read_back_off_disk(tmp_path: Path) -> Non
         assert record.selection.rationale in loaded.to_text()
 
 
+def test_the_report_diffs_the_policy_each_cycle_deployed(tmp_path: Path) -> None:
+    """Issue #20: the report shows the policy's *code* changing, cycle by cycle.
+
+    The revision wins cycle 0, so cycle 1 deploys different source and the report
+    has to show that as a diff of the two. Cycle 1 then selects the same source
+    again — the stub answers from a one-entry script — so there is nothing to
+    show and the report has to say so rather than print an empty hunk or repeat
+    the previous cycle's.
+
+    Asserted on the lines the two sources differ by, so a report that diffed a
+    cycle against itself (always unchanged), against the *selected* source
+    instead of the *deployed* one (always changed), or one cycle out of step
+    fails here.
+    """
+    run = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+
+    text = run.to_text()
+    printed = [line.strip() for line in text.splitlines()]
+    before, after = BREADTH_SOURCE.splitlines(), THRIFTY_SOURCE.splitlines()
+    for line in set(after) - set(before):
+        assert f"+{line}" in printed
+    for line in set(before) - set(after):
+        assert f"-{line}" in printed
+    # Cycle 1 redeploys what cycle 0 already deployed a revision of, and the
+    # revision offered is the same text again: no diff, and the report says it.
+    assert "cycle 1: unchanged" in printed
+
+
 def test_the_toy_loop_reports_the_cost_split_from_the_command_line(tmp_path: Path) -> None:
     """Issue #18's "done when": a 3-cycle toy run emits a report showing the split.
 
