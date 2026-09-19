@@ -199,11 +199,13 @@ class ReplayPolicy(Protocol):
         ``tree`` is the revealed subtree ``T^{m,k}``, carrying the stored
         observations and scores of everything revealed so far and nothing else.
         ``eligible`` is ``A(T^{m,k})``, the root followed by the revealed
-        leaves; ``width`` is ``W``. Selecting the root twice in one batch opens
-        two branches, as online. Selecting any other node twice reveals nothing
-        the second time — a non-root node has at most one recorded child — and
-        is a batch the online rollout refuses outright (see
-        ``orchestrator._check_batch``), so a policy should not issue one.
+        leaves; ``width`` is ``W``. A batch is retrieved in order, so repeating
+        a node walks the unrevealed children the recording holds under it: two
+        selections of the root open two branches, as online. Repeating any
+        other node is a batch the online rollout refuses outright (see
+        ``orchestrator._check_batch``), so a policy should not issue one; over
+        a tree this repo recorded it gains nothing anyway, since a non-root
+        node there has at most one recorded child.
         """
         ...
 
@@ -593,12 +595,15 @@ class ReplayRun:
     def reveal(self, batch: Sequence[str]) -> ReplayRound:
         """Take one decision round: reveal what ``batch`` retrieves from the world.
 
-        The batch is taken in order, so two selections of the root open two of
-        its unrevealed branches, while a leaf selected twice reveals its one
-        recorded child and then nothing. An empty batch is the policy's stop
-        action and is not a round — passing one here is rejected rather than
-        logged, because an empty round would inflate Equation 1's ``k^{m,★}``
-        with a decision that revealed nothing.
+        Eligibility is checked once, against ``A(T^{m,k})`` as the round began,
+        and the batch is then retrieved in order — so repeating a node walks
+        the unrevealed children the recording holds under it: two selections of
+        the root open two of its branches, and two of a leaf reveal a second
+        recorded child where one exists, which a rollout of ours never records
+        (see ``orchestrator._check_batch``). An empty batch is the policy's
+        stop action and is not a round — passing one here is rejected rather
+        than logged, because an empty round would inflate Equation 1's
+        ``k^{m,★}`` with a decision that revealed nothing.
         """
         batch = tuple(batch)
         if not batch:
@@ -680,9 +685,11 @@ class ReplayRun:
         wherever a node has at most one child — and a rollout of ours records
         nothing else, since only the root may be selected twice in a batch (see
         ``orchestrator._check_batch``, and issue #31). Where a tree recorded
-        elsewhere does branch off a non-root node, the extra children stay
-        unrevealed: revealing the first stops their parent being a leaf, so it
-        leaves ``A(T)`` for good and that world can never be fully revealed.
+        elsewhere does branch off a non-root node, its extra children are
+        reachable only from the batch that first reveals that node, which walks
+        them by naming it again: once a round ends, the node is no longer a
+        leaf and has left ``A(T)`` for good, so whatever it still holds can
+        never be revealed.
         Revisit if the authors' implementation lands (see references/method.md).
         """
         for child in self._world._recorded_children(node_id):
