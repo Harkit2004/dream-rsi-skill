@@ -43,7 +43,7 @@ import json
 import os
 import shutil
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -60,13 +60,14 @@ from dream_rsi.orchestrator import (
     run_rollout,
 )
 from dream_rsi.replay import ReplaySimulator
-from dream_rsi.sandbox import DEFAULT_LIMITS, SandboxLimits, SandboxedPolicy
+from dream_rsi.sandbox import DEFAULT_LIMITS, SandboxedPolicy, SandboxLimits
 from dream_rsi.tree import DiscoveryTree
 from dream_rsi.workspace import SnapshotStore
 
 __all__ = [
     "CYCLES_DIRNAME",
     "CYCLE_TEMPLATE",
+    "DEFAULT_POLICY_SOURCE",
     "NEXT_POLICY_FILENAME",
     "POLICY_FILENAME",
     "RECORD_FILENAME",
@@ -131,8 +132,8 @@ class RunConfig:
     """
 
     cycles: int = 3
-    rollout: RolloutConfig = RolloutConfig()
-    dreaming: DreamConfig = DreamConfig()
+    rollout: RolloutConfig = field(default_factory=RolloutConfig)
+    dreaming: DreamConfig = field(default_factory=DreamConfig)
     versions: int = DEFAULT_VERSIONS
     attempts: int = DEFAULT_ATTEMPTS
     limits: SandboxLimits = DEFAULT_LIMITS
