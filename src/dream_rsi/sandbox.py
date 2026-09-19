@@ -92,6 +92,15 @@ _BOOTSTRAP = (
 # rather than the head: a record is read to find out why the candidate stopped.
 _CAPTURE_LIMIT = 4096
 
+# How much of one response this process will hold while waiting for the end of
+# the line. A cap here and not only in the child, because the descriptor the
+# protocol answers on is open in the process the candidate runs in and
+# ``os.write`` raises no audit event: a candidate can write down it directly and
+# never send a newline, and then the deadline bounds only how long this process
+# spends allocating. One legal response is a batch of node ids, so a megabyte is
+# already orders of magnitude more than a correct candidate produces.
+_RESPONSE_LIMIT = 1024 * 1024
+
 
 @dataclass(frozen=True)
 class SandboxLimits:
@@ -106,6 +115,11 @@ class SandboxLimits:
     ``cpu_seconds`` is cumulative over the policy's whole life, so it also bounds
     a candidate that burns a slice of CPU on every round rather than spinning on
     one, and ``memory_bytes`` caps its address space.
+
+    ``disk_bytes`` caps any one file the child writes. The scratch directory is a
+    directory on a real filesystem, and the candidate's own stdout and stderr are
+    redirected to files, so without it a policy reaches the host's disk by
+    writing — or simply by printing — for as long as it is alive.
 
     PAPER-GAP: the paper does not discuss executing the policy code it has an LLM
     write — no limits, no isolation, nothing on what happens to a version that
@@ -124,6 +138,7 @@ class SandboxLimits:
     wall_seconds: float = 10.0
     cpu_seconds: int = 5
     memory_bytes: int = 512 * 1024 * 1024
+    disk_bytes: int = 64 * 1024 * 1024
 
     def __post_init__(self) -> None:
         # Not "must be non-negative": a limit of zero is a limit nothing can
@@ -134,6 +149,8 @@ class SandboxLimits:
             raise ValueError(f"cpu_seconds must be positive, got {self.cpu_seconds}")
         if self.memory_bytes <= 0:
             raise ValueError(f"memory_bytes must be positive, got {self.memory_bytes}")
+        if self.disk_bytes <= 0:
+            raise ValueError(f"disk_bytes must be positive, got {self.disk_bytes}")
 
 
 DEFAULT_LIMITS = SandboxLimits()
@@ -223,6 +240,7 @@ class SandboxedPolicy:
                     "limits": {
                         "cpu_seconds": limits.cpu_seconds,
                         "memory_bytes": limits.memory_bytes,
+                        "disk_bytes": limits.disk_bytes,
                     },
                 }
             )
@@ -366,7 +384,9 @@ class SandboxedPolicy:
         response = self._receive(deadline)
         if response.get("ok") is not True:
             error = response.get("error")
-            raise self._die(error if isinstance(error, str) else _short(response))
+            # Clipped: the candidate chooses this text, and a whole response's
+            # worth of it would be carried in a report per failed cell.
+            raise self._die(_clip(error) if isinstance(error, str) else _short(response))
         return response
 
     def _send(self, line: str, deadline: float) -> None:
@@ -395,6 +415,11 @@ class SandboxedPolicy:
             if not chunk:
                 raise self._die(f"the sandboxed policy {self._status()}")
             buffer += chunk
+            if len(buffer) > _RESPONSE_LIMIT:
+                raise self._die(
+                    f"the sandboxed policy answered with more than "
+                    f"{_RESPONSE_LIMIT} bytes and no complete line"
+                )
         line = bytes(buffer).split(b"\n", 1)[0]
         try:
             response = json.loads(line)
@@ -533,6 +558,14 @@ def _tail(path: Path) -> str:
     if len(text) <= _CAPTURE_LIMIT:
         return text
     return "…" + text[-_CAPTURE_LIMIT:]
+
+
+def _clip(text: str) -> str:
+    """Text a candidate wrote, at a length a failure record can carry.
+
+    The head, unlike :func:`_tail`: an exception's type and message come first.
+    """
+    return text if len(text) <= _CAPTURE_LIMIT else text[:_CAPTURE_LIMIT] + "…"
 
 
 def _short(value: Any) -> str:

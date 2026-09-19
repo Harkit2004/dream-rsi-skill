@@ -43,7 +43,14 @@ NAMES = ("wide_shallow", "narrow_deep", "failing_branch")
 # a fresh interpreter importing ``dream_rsi`` is never the thing that trips it:
 # starting a policy and replaying a whole fixture through it measures around 35ms
 # of wall clock and 35ms of child CPU, so these leave a factor of tens in hand.
-TEST_LIMITS = SandboxLimits(wall_seconds=1.5, cpu_seconds=1, memory_bytes=512 * 1024 * 1024)
+TEST_LIMITS = SandboxLimits(
+    wall_seconds=1.5,
+    cpu_seconds=1,
+    memory_bytes=512 * 1024 * 1024,
+    # A megabyte is thousands of times what any policy here writes, and small
+    # enough that the tests which do overrun it cost a megabyte rather than 64.
+    disk_bytes=1024 * 1024,
+)
 
 # A legal candidate: the baseline, reached through the sandbox. Subclassing is
 # what makes the comparison in ``test_a_sandboxed_baseline_replays_exactly_as_it
@@ -172,7 +179,11 @@ def test_a_hanging_policy_is_killed_and_recorded_as_a_failure(what: str, body: s
     error = _failure(_policy_source(body))
     elapsed = time.monotonic() - started
 
-    assert elapsed < 30.0, f"a {what} policy took {elapsed:.1f}s to be killed"
+    # Derived from the limit rather than a round number, so a deadline that
+    # silently grew is a failure here. The margin covers starting an interpreter
+    # and killing it, which measures in tens of milliseconds.
+    allowed = TEST_LIMITS.wall_seconds + 3.0
+    assert elapsed < allowed, f"a {what} policy took {elapsed:.1f}s to be killed"
     assert "SandboxError" in error, error
 
 
@@ -184,6 +195,49 @@ def test_a_memory_bomb_is_killed() -> None:
     """
     error = _failure(_policy_source("self.hog = bytearray(8 * 1024 * 1024 * 1024)"))
     assert "SandboxError" in error, error
+
+
+@pytest.mark.parametrize(
+    ("what", "body"),
+    [
+        ("a file it writes", "open('hog', 'wb').write(b'x' * (4 * 1024 * 1024))"),
+        # Its own stdout is redirected to a capture file, so printing reaches the
+        # same disk without the policy naming a path at all.
+        ("its own output", "for _ in range(64):\n    print('x' * 65536, end='')"),
+    ],
+)
+def test_filling_the_disk_is_stopped(what: str, body: str) -> None:
+    """The scratch directory is on a real filesystem, so its size is bounded too.
+
+    Neither the CPU cap nor the address-space cap bounds a file: without the file
+    size limit a candidate fills the host's disk, which outlives the round and
+    takes the rest of the machine with it.
+    """
+    error = _failure(_policy_source(body))
+    # SIGXFSZ by default, or ``EFBIG`` if the candidate handled that signal.
+    assert "signal" in error or "too large" in error.lower(), error
+
+
+def test_an_endless_answer_does_not_grow_the_harness() -> None:
+    """The parent bounds what it buffers, because the candidate shares the child.
+
+    ``os.write`` raises no audit event and the response descriptor's number is in
+    the child's own ``sys.argv``, so a candidate can write down it directly and
+    never end the line. The deadline bounds only how long this process spends
+    allocating — the limit that saves the harness is the harness's own.
+    """
+    error = _failure(
+        _policy_source(
+            """
+            import os
+            import sys
+            answer = os.fdopen(int(sys.argv[2]), 'wb', buffering=0)
+            while True:
+                answer.write(b'x' * 65536)
+            """
+        )
+    )
+    assert "no complete line" in error, error
 
 
 @pytest.mark.parametrize(
@@ -266,12 +320,17 @@ def test_a_failure_record_carries_the_policys_output_and_its_exception() -> None
     error = _failure(
         _policy_source(
             """
+            import sys
             print('frontier looked empty')
+            print('scored every leaf at zero', file=sys.stderr)
             raise ZeroDivisionError('probe scores summed to zero')
             """
         )
     )
+    # Both streams: they are captured separately and reported separately, so a
+    # regression that dropped one would keep every other assertion here true.
     assert "frontier looked empty" in error, error
+    assert "scored every leaf at zero" in error, error
     assert "ZeroDivisionError" in error, error
     assert "probe scores summed to zero" in error, error
 

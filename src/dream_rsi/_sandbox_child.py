@@ -12,7 +12,9 @@ single line of its source is compiled:
 1. **Resource limits** (:mod:`resource`). CPU time is cumulative over the whole
    life of the process, so a policy cannot spread a spin across many decision
    rounds; the address-space cap turns a memory bomb into a ``MemoryError`` in
-   the child instead of an OOM kill somewhere else on the machine.
+   the child instead of an OOM kill somewhere else on the machine; and the file
+   size cap is what stands between a candidate and the host's disk, since a
+   scratch directory it may write in is still a directory on a real filesystem.
 2. **An audit hook** (:func:`sys.addaudithook`), which refuses the network,
    starting or signalling processes, importing the modules that would step
    around this hook, and writing anywhere but the scratch directory. Reads are
@@ -167,11 +169,17 @@ def _install_limits(limits: dict[str, Any], scratch: str) -> None:
     """Apply every layer, before any candidate code exists to see it happen."""
     cpu = int(limits["cpu_seconds"])
     memory = int(limits["memory_bytes"])
+    disk = int(limits["disk_bytes"])
     # Soft below hard: the soft limit arrives as SIGXCPU, which a candidate
     # could install a handler for, and the hard limit is then an uncatchable
     # SIGKILL one second later.
     resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 1))
     resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
+    # Bytes on disk, which neither cap above bounds. There are two ways a
+    # candidate reaches the host's filesystem: a file it writes in the scratch
+    # directory, and the capture files its own stdout and stderr are redirected
+    # to, which it can write to for as long as it is alive.
+    resource.setrlimit(resource.RLIMIT_FSIZE, (disk, disk))
     # A killed candidate should not leave a core file behind in the scratch dir.
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
     sys.addaudithook(_Guard(scratch))
