@@ -14,6 +14,7 @@ and the development agent is a stub that answers from a list.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -30,10 +31,12 @@ from dream_rsi.orchestrator import (
     TREE_FILENAME,
     RolloutConfig,
 )
+from dream_rsi.pool import PoolConfig
 from dream_rsi.run import (
     CYCLE_TEMPLATE,
     CYCLES_DIRNAME,
     POLICY_FILENAME,
+    POOL_DIRNAME,
     RECORD_FILENAME,
     Run,
     RunConfig,
@@ -128,6 +131,7 @@ def _run(
     cycles: int = 3,
     policy: str = BREADTH_SOURCE,
     scratch_root: Path | None = None,
+    pool: PoolConfig | None = None,
 ) -> Run:
     """A toy run in ``directory``: two versions a cycle, over the toy landscape."""
     return run_cycles(
@@ -145,6 +149,7 @@ def _run(
             # that can select anything other than what it started with.
             versions=2,
             limits=TEST_LIMITS,
+            pool=PoolConfig() if pool is None else pool,
         ),
         scratch_root=scratch_root,
     )
@@ -330,3 +335,86 @@ def test_the_toy_loop_runs_three_cycles_from_the_command_line(tmp_path: Path) ->
         )
         assert record["index"] == index
         assert len(record["pool"]) == index + 1
+
+
+def test_a_resumed_run_reports_the_pool_it_had_at_shutdown(tmp_path: Path) -> None:
+    """Issue #17's "done when": the simulator pool outlives the session.
+
+    Two invocations against one directory, the second inheriting everything the
+    first left: the same trees, under the same names, holding the same nodes and
+    the same bytes. A driver whose pool was only the cycle directories it
+    happened to walk this session — or one that re-recorded a finished cycle's
+    tree on the way past and grew the pool by doing so — reports something else
+    the second time round.
+    """
+    first = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+
+    resumed = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+
+    assert first.pool == ("cycle_000", "cycle_001")
+    assert resumed.pool == first.pool
+    assert resumed.stats == first.stats
+    assert resumed.stats.trees == 2
+    assert resumed.stats.nodes == sum(record.attempts + 1 for record in first.cycles)
+    assert resumed.stats.bytes > 0
+
+
+def test_a_resumed_run_restores_a_pool_tree_that_went_missing(tmp_path: Path) -> None:
+    """A finished cycle is in the pool, whatever happened to the pool directory.
+
+    The cycle records are what say which cycles this run may trust, and each one
+    names the world it recorded; the pool is where dreaming reads those worlds
+    from. A resumed run whose pool had been cleared out from under it — a
+    half-copied run directory, a cleaner, an older run that predates the pool —
+    would otherwise dream over a history shorter than the one its own records
+    claim, silently, which is the one thing issue #17 says not to do.
+    """
+    whole = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+    shutil.rmtree(tmp_path / POOL_DIRNAME)
+
+    resumed = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+
+    assert resumed.pool == whole.pool
+    assert resumed.stats == whole.stats
+
+
+def test_a_resumed_run_restores_a_pool_tree_that_will_not_load(tmp_path: Path) -> None:
+    """A pool entry that is a name and no readable tree is a tree gone missing.
+
+    A file left half-written by an interrupted copy still lists, so a resume
+    that asked only which names the directory held would leave it in place —
+    and then fail counting the pool, with a good copy of that tree sitting in
+    the cycle directory the whole time. The name is not the tree; whether it
+    loads is.
+    """
+    whole = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+    (tmp_path / POOL_DIRNAME / "cycle_000.json").write_text('{"nodes": [', encoding="utf-8")
+
+    resumed = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+
+    assert resumed.pool == whole.pool
+    assert resumed.stats == whole.stats
+
+
+def test_a_pool_limit_bounds_the_history_a_cycle_dreams_over(tmp_path: Path) -> None:
+    """Subsampling is opt-in, and what it dropped is on the record.
+
+    Dreaming costs one replay per tree per version, so a pool that grows every
+    cycle eventually costs more than the online evaluations it replaced. A run
+    given a limit dreams over that many worlds and its record says which —
+    a driver that took the limit and went on replaying the whole history, or one
+    that dropped the trees from the store instead of from this round, fails
+    here. The store keeps everything either way: the limit is a budget for one
+    cycle, not a retention policy.
+    """
+    run = _run(tmp_path, ScriptedDeveloper(), cycles=3, pool=PoolConfig(limit=1, seed=0))
+
+    # Each cycle dreams over one world, and §3 appends before it dreams, so the
+    # one world left is the cycle's own.
+    assert [record.pool for record in run.cycles] == [
+        ("cycle_000",),
+        ("cycle_001",),
+        ("cycle_002",),
+    ]
+    assert run.pool == ("cycle_000", "cycle_001", "cycle_002")
+    assert run.stats.trees == 3
