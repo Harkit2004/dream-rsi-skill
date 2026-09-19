@@ -374,8 +374,11 @@ def _plan(policy: ExplorationPolicy, config: RolloutConfig) -> GridPlan | None:
         # inherit the template stub and do not delegate grid choice to the
         # runner's fallback." A policy that defined the hook and answered with
         # something else planned nothing, and the rollout it would get is not the
-        # one it asked for.
-        raise ValueError(
+        # one it asked for. ``ValueError`` and not ``TypeError``, for the reason
+        # every other refusal in this module is one: nothing here was handed a
+        # wrong argument, a policy made a decision this runner will not run —
+        # same as selecting a node outside ``A(T)`` (see ``_check_batch``).
+        raise ValueError(  # noqa: TRY004 - a decision this runner refuses, as below
             f"plan_grid must return a GridPlan, got {plan!r}; a policy that plans "
             f"no grid does not define plan_grid at all"
         )

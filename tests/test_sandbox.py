@@ -448,13 +448,13 @@ def test_a_candidate_that_answers_with_something_other_than_a_plan_fails(
         f"        {returned}\n"
     )
 
-    with SandboxedPolicy(source, limits=TEST_LIMITS, scratch_root=tmp_path) as policy:
-        with pytest.raises(SandboxError, match="GridPlan"):
-            policy.plan_grid(
-                GridPlanningContext(
-                    hard_max_branch_count=8, hard_max_refine_count=4, max_workers=3
-                )
-            )
+    with (
+        SandboxedPolicy(source, limits=TEST_LIMITS, scratch_root=tmp_path) as policy,
+        pytest.raises(SandboxError, match="GridPlan"),
+    ):
+        policy.plan_grid(
+            GridPlanningContext(hard_max_branch_count=8, hard_max_refine_count=4, max_workers=3)
+        )
 
 
 def test_a_planning_candidate_and_a_plain_one_score_in_the_same_sweep() -> None:
