@@ -35,8 +35,8 @@ from dream_rsi.pool import PoolConfig
 from dream_rsi.run import (
     CYCLE_TEMPLATE,
     CYCLES_DIRNAME,
-    POOL_DIRNAME,
     POLICY_FILENAME,
+    POOL_DIRNAME,
     RECORD_FILENAME,
     Run,
     RunConfig,
