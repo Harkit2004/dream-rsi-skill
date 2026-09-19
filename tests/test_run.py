@@ -169,6 +169,21 @@ def _trees(directory: Path) -> list[str]:
     ]
 
 
+@pytest.mark.parametrize("field", ["cycles", "versions", "attempts"])
+def test_a_run_that_could_not_finish_a_cycle_is_rejected_before_it_starts(field: str) -> None:
+    """A count below one is refused when the config is built, not mid-cycle.
+
+    ``develop`` already rejects a round of no versions and a revision of no
+    attempts, but it is called after the online rollout has run and been saved —
+    the expensive half, and the one that costs real agent calls. A driver that
+    left the check to ``develop`` therefore burns a rollout to find out its
+    configuration was never runnable, and leaves behind a cycle directory
+    holding a tree no record vouches for.
+    """
+    with pytest.raises(ValueError, match="at least one"):
+        RunConfig(**{field: 0})
+
+
 def test_a_three_cycle_run_grows_the_pool_by_one_tree_per_cycle(tmp_path: Path) -> None:
     """Issue #16's first "tests first": three cycles, one new replay world each.
 

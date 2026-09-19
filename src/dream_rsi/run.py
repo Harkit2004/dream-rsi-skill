@@ -144,6 +144,13 @@ class RunConfig:
             # one deploy-and-dream. Zero of them is a caller's mistake, not an
             # empty run.
             raise ValueError(f"a run needs at least one cycle, got {self.cycles}")
+        # Checked here as well as in ``develop``, which is only reached once this
+        # cycle's rollout has run and been saved: a configuration that can never
+        # finish a cycle should not first spend the online half of one.
+        if self.versions < 1:
+            raise ValueError(f"a cycle needs at least one policy version, got {self.versions}")
+        if self.attempts < 1:
+            raise ValueError(f"a revision needs at least one attempt, got {self.attempts}")
 
 
 @dataclass(frozen=True)
