@@ -29,8 +29,9 @@ are LLM-written Python (issues #13, #14), so a version that throws is a normal
 event rather than a bug in the harness. It is recorded as a failure against the
 world it fell over on, the rest of the sweep runs, and the version scores no
 aggregate at all — see :class:`VersionReport`. Bounding what such code may *do*
-(time, memory, imports) belongs to the sandbox in issue #13; this module only
-contains the exception.
+(time, memory, the network, the filesystem) belongs to
+:mod:`dream_rsi.sandbox`, which raises where a candidate oversteps; this module
+only contains the exception.
 
 Dreaming is replay, so this module reaches the simulator, the objective and the
 tree, and no adapter: nothing on the replay path may call a discovery agent or
@@ -84,8 +85,11 @@ class PolicyCandidate:
     (§3: replay "resets the policy's per-rollout state" before each policy-world
     pair), and the cells of one version's row may be replayed at the same time,
     where a shared instance would have two worlds writing over each other's
-    state. It is also where model-written code enters — issue #13's sandbox
-    compiles a version's source into exactly this shape.
+    state. It is also where model-written code enters:
+    :func:`dream_rsi.sandbox.sandboxed_candidate` builds exactly this, with a
+    factory that starts a child process per world and takes the version's
+    decisions there. That is the only way source becomes a candidate — a policy
+    an LLM wrote is never called in this process.
     """
 
     name: str
