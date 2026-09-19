@@ -259,6 +259,27 @@ class DreamReport:
     config: DreamConfig
 
     @property
+    def cells(self) -> int:
+        """How many ``(version, world)`` replays this round ran (issue #18)."""
+        return sum(len(version.replays) for version in self.versions)
+
+    @property
+    def reveals(self) -> int:
+        """``Σ N_i^m`` over the grid: what this round's replays revealed (issue #18).
+
+        The offline half's unit of work, and the same ``N`` Equation 1 charges
+        each version for. A cell the version raised on reveals nothing that can
+        be counted — it has no trajectory at all — so it contributes zero and is
+        visible instead as one of :attr:`VersionReport.failures`.
+        """
+        return sum(
+            replay.result.revealed
+            for version in self.versions
+            for replay in version.replays
+            if replay.result is not None
+        )
+
+    @property
     def ranking(self) -> tuple[str, ...]:
         """Version names, best average replay score first.
 

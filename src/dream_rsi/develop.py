@@ -191,11 +191,17 @@ class DevelopmentReport:
     exactly these versions, so ranking, the comparison table and the JSON a
     reader inspects the round from are the dreaming harness's and not a second
     implementation of them.
+
+    ``calls`` is how many times the development agent was asked for a revision,
+    which is what the round cost in model calls (issue #18). It is not the
+    version count: a version the agent needed three tries to write cost three
+    calls, and the tries that were refused are in ``rejected``.
     """
 
     versions: tuple[DevelopedVersion, ...]
     rejected: tuple[Rejection, ...]
     comparison: DreamReport
+    calls: int = 0
 
 
 def validate_source(source: str, *, policy_name: str = DEFAULT_POLICY_NAME) -> str | None:
@@ -268,6 +274,7 @@ def develop(
 
     developed: list[DevelopedVersion] = []
     rejected: list[Rejection] = []
+    calls = 0
     revision: str | None = source
     while revision is not None:
         name = f"v{len(developed)}"
@@ -289,6 +296,10 @@ def develop(
             break
         revision, refused = _revise(developer, tuple(developed), attempts=attempts)
         rejected.extend(refused)
+        # One call per refusal, plus the one that was finally usable: ``_revise``
+        # asks again only after a refusal and returns as soon as it has a
+        # revision, so this is the number of times the agent answered.
+        calls += len(refused) + (0 if revision is None else 1)
 
     return DevelopmentReport(
         versions=tuple(developed),
@@ -298,6 +309,7 @@ def develop(
             worlds=tuple(world.name for world in worlds),
             config=config,
         ),
+        calls=calls,
     )
 
 

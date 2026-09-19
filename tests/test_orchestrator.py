@@ -246,6 +246,26 @@ def test_a_failing_attempt_is_recorded_and_the_rollout_continues(tmp_path, faili
         assert "exploded" in node.diagnostics["error"]
 
 
+def test_an_attempt_the_agent_raised_on_costs_a_call_and_buys_no_evaluation(tmp_path):
+    """The two online counts issue #18 asks for are two numbers, not one.
+
+    §4 prices discovery in "the total cumulative number of discovery-agent
+    calls", which is one per attempt whatever came back; an evaluation is what
+    that call bought, and an attempt the agent raised on bought none.
+    ``ExplodingAgent`` raises on the odd-seeded half of each batch, so this
+    rollout records four nodes, spends four agent calls and measures two of
+    them. A rollout reporting one number for both — an evaluation per attempt,
+    or a call per round — cannot tell the halves of this rollout apart.
+    """
+    policy = ScriptedPolicy(script=((0, 0), (0, 0)))
+
+    result = rollout(policy, tmp_path, workers=2, max_rounds=2, agent=ExplodingAgent())
+
+    assert len(attempts(result)) == 4
+    assert result.cost.agent_calls == 4
+    assert result.cost.evaluations == 2
+
+
 def test_selecting_a_node_that_is_not_eligible_is_rejected(tmp_path):
     # Round 0 gives the root a child; round 1 gives that child one, which makes
     # it an interior node. A(T) is the root plus the leaves (§3), so reselecting

@@ -37,6 +37,7 @@ from dream_rsi.adapters.agent import AgentContext, CodingAgent
 from dream_rsi.adapters.evaluator import EvalResult, TaskEvaluator, safe_evaluate
 from dream_rsi.adapters.fake_agent import FakeAgent
 from dream_rsi.adapters.toy_evaluator import ToyEvaluator
+from dream_rsi.cost import OnlineCost
 from dream_rsi.tree import DiscoveryTree, Node, eligible_nodes
 from dream_rsi.workspace import SnapshotStore
 
@@ -136,11 +137,18 @@ class RoundRecord:
 
 @dataclass(frozen=True)
 class Rollout:
-    """A completed online rollout: the tree it recorded and how it got there."""
+    """A completed online rollout: the tree it recorded and how it got there.
+
+    ``cost`` is what it spent getting there (issue #18), which is not read off
+    the tree: every attempt is a node and a discovery-agent call, but an attempt
+    whose agent raised never reached the evaluator, so the calls and the
+    measurements are two counts and only the rollout saw both.
+    """
 
     tree: DiscoveryTree
     rounds: tuple[RoundRecord, ...]
     stop_reason: str
+    cost: OnlineCost = OnlineCost()
 
     def save(self, directory: str | Path) -> None:
         """Write the tree and the round log into ``directory``.
@@ -234,6 +242,7 @@ def run_rollout(
     rounds: list[RoundRecord] = []
     deadline = None if config.max_seconds is None else time.monotonic() + config.max_seconds
     attempts = 0
+    evaluations = 0
     stop_reason = STOP_MAX_ROUNDS
 
     with ThreadPoolExecutor(max_workers=config.workers) as pool:
@@ -274,7 +283,7 @@ def run_rollout(
             )
 
             produced = []
-            for parent_id, (artifact, result, snapshot_ref) in zip(
+            for parent_id, (artifact, result, snapshot_ref, evaluated) in zip(
                 scheduled, outcomes, strict=True
             ):
                 node = tree.add_child(
@@ -285,10 +294,19 @@ def run_rollout(
                     **result.to_node_fields(evaluator.direction),
                 )
                 produced.append(node.id)
+                evaluations += int(evaluated)
             attempts += len(produced)
             rounds.append(RoundRecord(index, len(batch), tuple(scheduled), tuple(produced)))
 
-    return Rollout(tree=tree, rounds=tuple(rounds), stop_reason=stop_reason)
+    return Rollout(
+        tree=tree,
+        rounds=tuple(rounds),
+        stop_reason=stop_reason,
+        # One discovery-agent call per attempt (§4), counted where the attempts
+        # were scheduled rather than off the finished tree, which cannot say
+        # which of its nodes reached an evaluator.
+        cost=OnlineCost(agent_calls=attempts, evaluations=evaluations),
+    )
 
 
 def _check_batch(batch: Sequence[str], eligible: Sequence[str]) -> None:
@@ -350,7 +368,7 @@ def _run_attempt(
     context: AgentContext,
     base_ref: str | None,
     name: str,
-) -> tuple[str | None, EvalResult, str | None]:
+) -> tuple[str | None, EvalResult, str | None, bool]:
     """One attempt in its own workspace, and the snapshot it leaves behind (§3).
 
     The workspace starts as the parent's saved state, belongs to this attempt
@@ -363,15 +381,18 @@ def _run_attempt(
     recording a node: that is a broken harness, not a failed attempt.
     """
     if snapshots is None:
-        return (*_attempt(agent, evaluator, context), None)
+        artifact, result, evaluated = _attempt(agent, evaluator, context)
+        return artifact, result, None, evaluated
     with snapshots.checkout(base_ref, name) as workspace:
-        outcome = _attempt(agent, evaluator, replace(context, workspace=workspace))
-        return (*outcome, snapshots.capture(workspace))
+        artifact, result, evaluated = _attempt(
+            agent, evaluator, replace(context, workspace=workspace)
+        )
+        return artifact, result, snapshots.capture(workspace), evaluated
 
 
 def _attempt(
     agent: CodingAgent, evaluator: TaskEvaluator, context: AgentContext
-) -> tuple[str | None, EvalResult]:
+) -> tuple[str | None, EvalResult, bool]:
     """One generation–evaluation attempt, which never raises.
 
     A worker that dies takes one node down, not the rollout: the attempt is
@@ -379,12 +400,21 @@ def _attempt(
     replayable outcome — the paper's policies classify failed branches rather
     than never seeing them (§B.2). Evaluator crashes are already handled by
     :func:`safe_evaluate`; this adds the generation half.
+
+    The third element is whether the evaluator was reached, which is what the
+    rollout counts its evaluations from (issue #18). It is reported rather than
+    inferred from the node: an evaluation that ran and failed also leaves a node
+    with no score.
     """
     try:
         artifact = agent.propose(context)
     except Exception as exc:  # noqa: BLE001 - the whole point is to not propagate
-        return None, EvalResult.failed(f"agent raised {type(exc).__name__}: {exc}")
-    return artifact.content, safe_evaluate(evaluator, artifact.content, context.workspace)
+        return None, EvalResult.failed(f"agent raised {type(exc).__name__}: {exc}"), False
+    return (
+        artifact.content,
+        safe_evaluate(evaluator, artifact.content, context.workspace),
+        True,
+    )
 
 
 def _observations(result: EvalResult) -> tuple[str, ...]:
