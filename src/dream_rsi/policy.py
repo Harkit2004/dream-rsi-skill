@@ -31,6 +31,14 @@ and :class:`BudgetAwarePolicy` mixes the two and stops paying when the returns
 stop. Equation 1 ranks them differently (``tests/test_policy.py``), which is what
 gives issue #12 something to compare and issue #14 somewhere to start.
 
+Alongside them are the four observation signals §B.1 offers a policy from
+``see.policy.observation_signal`` — :func:`branch_promising`,
+:func:`branch_failed_hard`, :func:`probe_improved_vs_parent` and
+:func:`probe_improved_vs_baseline`. They are the vocabulary a policy states its
+reasons in, and the vocabulary the model rewriting it (issue #14) is pointed at,
+so each reads the revealed tree and refuses a node outside it.
+:class:`GreedyBestFirstPolicy` decides in them.
+
 Policies run inside the frozen replay world, so this module imports the tree and
 nothing else: no agent, no evaluator, no simulator. Its decisions read only the
 revealed prefix — "Never use unrevealed scores, a true optimum, hardcoded winning
@@ -40,20 +48,28 @@ baseline is reproducible whatever seed it is handed (working rule 5).
 
 from __future__ import annotations
 
+import math
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from dream_rsi.tree import DiscoveryTree, eligible_nodes
+from dream_rsi.tree import DiscoveryTree, Node, eligible_nodes
 
 __all__ = [
     "DEFAULT_BETA",
+    "DEFAULT_FAILURE_STREAK",
+    "DEFAULT_MARGIN",
+    "DEFAULT_PATIENCE",
     "BreadthFirstPolicy",
     "BudgetAwarePolicy",
     "GreedyBestFirstPolicy",
     "OptimalPolicy",
     "Question",
+    "branch_failed_hard",
+    "branch_promising",
+    "probe_improved_vs_baseline",
+    "probe_improved_vs_parent",
 ]
 
 # PAPER-GAP: §B.2 has every policy read "exactly one scalar" in ``__init__`` —
@@ -332,10 +348,22 @@ class GreedyBestFirstPolicy(OptimalPolicy):
     def choose(
         self, tree: DiscoveryTree, live: Sequence[str], width: int
     ) -> Sequence[str]:
-        """The best-anchored live frontier, else a batch of new branches."""
+        """The best-anchored live frontier that is still promising, else new branches."""
         ranked = _by_anchor(tree, live)
         if ranked:
-            return (ranked[0],)
+            # §B.2 ranks a frontier on its whole trajectory — "score trend,
+            # regressions, failure/repair sequence" — and not on the anchor
+            # alone, so a branch that has stopped gaining loses the round to one
+            # that has not. Deprioritised, never closed: it stays live and takes
+            # the round back as soon as its rivals stall too, which is what
+            # keeps a stalled branch from being written off permanently. Beta
+            # sets how long it is given, since "high beta means ... deeper
+            # patience, and weaker pruning" (§B.2).
+            patience = max(1, round(DEFAULT_PATIENCE * self.beta))
+            promising = tuple(
+                node_id for node_id in ranked if branch_promising(tree, node_id, patience=patience)
+            )
+            return ((promising or ranked)[0],)
         # PAPER-GAP: §B.2 requires a batch to mix exploitation with "new roots or
         # underexplored branches" without saying how an unopened root ranks
         # against a frontier whose branch has no successful anchor at all. We
@@ -425,6 +453,211 @@ class BudgetAwarePolicy(OptimalPolicy):
         elif self._size is not None and len(tree) > self._size:
             self._stagnant += 1
         self._size = len(tree)
+
+
+# --------------------------------------------------------------------------
+# Observation signals (§B.1's ``see.policy.observation_signal``, issue #11)
+#
+# The four names the paper's exploration prompt offers a policy: two about a
+# branch's trajectory, two about one probe's gain. They are what the policy —
+# and the model rewriting it (issue #14) — reasons in, so they read the revealed
+# tree ``T^{m,k}`` and nothing else. A signal asked about a node the policy has
+# not been shown refuses rather than answering: §B.2's prefix-only rule bars
+# "unrevealed scores", and a signal that quietly reached past the prefix would
+# inflate a dreamed score with attainment the replay never paid ``N`` for.
+#
+# PAPER-GAP: §B.1 names all four and defines none of them — no formula, and no
+# threshold for what counts as "promising" or as "failed hard". We read them off
+# the branch trajectory §B.2 requires a policy to reconstruct (successful
+# anchor, score trend, failure/repair sequence), and every threshold is a
+# parameter with a default stated on the function that takes it. The defaults
+# are deliberately counts of attempts rather than score levels, because §B.2
+# forbids "absolute score targets" and a task's scores have no fixed scale.
+# Revisit if the authors' implementation lands (see references/method.md).
+# --------------------------------------------------------------------------
+
+# How much better than what it is compared against a probe must measure before
+# it counts as an improvement. Zero is "strictly better at all".
+DEFAULT_MARGIN = 0.0
+
+# How many of a branch's most recent attempts are weighed for a gain before it
+# stops being promising. Two, so that one regression or one repairable failure
+# at the tip does not erase the branch's anchor (§B.2).
+DEFAULT_PATIENCE = 2
+
+# How long a run of attempts that measured nothing has to be before the branch
+# reads as hard-failed. Two, because §B.2 is explicit that one such error is not
+# enough: "Do not infer algorithmic failure from one such error."
+DEFAULT_FAILURE_STREAK = 2
+
+
+def branch_promising(
+    tree: DiscoveryTree, node_id: str, *, patience: int = DEFAULT_PATIENCE
+) -> bool:
+    """Is the branch ending at ``node_id`` still worth refining? (§B.2.)
+
+    True when at least one of the branch's last ``patience`` attempts gained on
+    the attempt it resumed from. That carries the *successful anchor* §B.1 asks
+    for as well — an attempt that gained necessarily measured something, so a
+    branch on which nothing ever evaluated is never promising.
+
+    The two halves are the two things §B.2 warns against conflating. A
+    repairable latest failure "must not erase its historical successful anchor",
+    so a single regression or failure at the tip leaves the branch promising;
+    but a branch that is "repeatedly unpromising after sufficient valid
+    evidence" stops being so, and ``patience`` is how much evidence is enough.
+
+    The root is not a branch and is never promising: nothing has been attempted
+    down it yet, which is a reason to open it rather than a trajectory to read.
+    """
+    _window("patience", patience)
+    attempts = _attempts(tree, node_id)
+    return any(probe_improved_vs_parent(tree, node.id) for node in attempts[-patience:])
+
+
+def branch_failed_hard(
+    tree: DiscoveryTree, node_id: str, *, streak: int = DEFAULT_FAILURE_STREAK
+) -> bool:
+    """Does the branch ending at ``node_id`` look hard-unrecoverable? (§B.2.)
+
+    True when its last ``streak`` attempts each produced no measurement at all —
+    ``s_v`` unset, an evaluation that returned no score rather than a bad one.
+
+    It reads the *current failure episode* only, at the tip: "a later successful
+    result reopens the branch and cancels closure based only on an earlier
+    failure". And it takes a run rather than a single attempt, because §B.2 will
+    not have algorithmic failure inferred from one error. Like every signal here
+    it stays a signal — §B.2: "``n_valid == 0`` and ``branch_failed_hard(obs)``
+    are signals, not unconditional closure" — so a policy weighs it against the
+    branch's anchor and remaining depth rather than closing on it.
+    """
+    _window("streak", streak)
+    attempts = _attempts(tree, node_id)
+    if len(attempts) < streak:
+        return False
+    return all(node.score is None for node in attempts[-streak:])
+
+
+def probe_improved_vs_parent(
+    tree: DiscoveryTree, node_id: str, *, margin: float = DEFAULT_MARGIN
+) -> bool:
+    """Did this attempt gain on the one it resumed from? (§B.1's ``delta_vs_parent``.)
+
+    True when ``node_id`` carries a score exceeding its parent's by more than
+    ``margin``. Both are canonical ``s_v``, larger-is-better (§3), so a
+    lower-is-better task compares correctly here without a special case — the
+    direction was applied once, where the node was recorded (see
+    ``adapters.evaluator.ScoreDirection``).
+
+    An attempt with no measurement gained on nothing, whatever its parent did.
+
+    PAPER-GAP: part of the gap above — the paper gives no ``delta_vs_parent``
+    for a probe whose parent has no score, which is every branch's first attempt
+    (the root is the initial workspace and carries no ``s_v``) and every repair
+    of a failed one. We count measuring where the parent could not as a gain:
+    it is the "prior repair outcome" §B.2 ranks on, and the alternative would
+    report a branch's opening attempt as an improvement on nothing. The root
+    itself is not a probe and has no parent to gain on. Revisit if the authors'
+    implementation lands (see references/method.md).
+    """
+    _margin(margin)
+    node = _revealed(tree, node_id)
+    if node.parent_id is None:
+        return False
+    return _gained(node.score, _revealed(tree, node.parent_id).score, margin)
+
+
+def probe_improved_vs_baseline(
+    tree: DiscoveryTree,
+    node_id: str,
+    baseline: float | None,
+    *,
+    margin: float = DEFAULT_MARGIN,
+) -> bool:
+    """Did this attempt beat the task's reference score? (§B.1's ``delta_vs_baseline``.)
+
+    ``baseline`` is the task's own reference — ``question.baseline_score``, which
+    this codebase states on the evaluator as
+    ``adapters.evaluator.TaskEvaluator.baseline_score`` (issue #2) — **in
+    canonical ``s_v`` units**, so a caller on a lower-is-better task converts it
+    with ``ScoreDirection.to_canonical`` first, exactly as the recorded node
+    scores it is compared against were converted. Passing it in rather than
+    reading it off a world is what keeps this module clear of the evaluator
+    adapter, which nothing on the replay path may import.
+
+    PAPER-GAP: part of the gap above — the paper's ``baseline_score`` is always
+    present, while a task here may state none (``None``). A task that names no
+    reference gives a probe nothing to fall short of, so any measurement
+    improves on it; a probe with no measurement improves on nothing either way.
+    The root is the initial workspace rather than an attempt, so it is not a
+    probe here any more than it is in :func:`probe_improved_vs_parent`.
+    Revisit if the authors' implementation lands (see references/method.md).
+    """
+    _margin(margin)
+    node = _revealed(tree, node_id)
+    if node.parent_id is None:
+        return False
+    return _gained(node.score, baseline, margin)
+
+
+def _gained(score: float | None, reference: float | None, margin: float) -> bool:
+    """Is ``score`` a measurement that beats ``reference`` by more than ``margin``?"""
+    if score is None:
+        return False
+    if reference is None:
+        return True
+    return score > reference + margin
+
+
+def _revealed(tree: DiscoveryTree, node_id: str) -> Node:
+    """``node_id`` as the policy has been shown it, or a refusal naming it.
+
+    A signal reads ``T^{m,k}`` and nothing else. Answering ``False`` for a node
+    outside it would be indistinguishable from a real answer, which is how a
+    policy would come to reason about a branch it had not paid to reveal.
+    """
+    try:
+        return tree.node(node_id)
+    except KeyError:
+        raise ValueError(
+            f"node {node_id!r} is not in the revealed tree: a signal reads the "
+            f"revealed prefix only, never a node the policy has not been shown"
+        ) from None
+
+
+def _attempts(tree: DiscoveryTree, node_id: str) -> tuple[Node, ...]:
+    """The branch's attempts, root first, the root itself excluded.
+
+    §B.2's "ordered prefix trajectory" for one frontier: the recorded attempts
+    that lead to it, oldest first, so the tip is last.
+    """
+    path: list[Node] = []
+    current: str | None = node_id
+    while current is not None:
+        node = _revealed(tree, current)
+        if node.parent_id is not None:
+            path.append(node)
+        current = node.parent_id
+    path.reverse()
+    return tuple(path)
+
+
+def _window(name: str, value: int) -> None:
+    """Reject a window that would weigh something other than what it names.
+
+    ``attempts[-0:]`` is the whole branch rather than none of it, so a window of
+    zero would silently give a signal every attempt a policy ever made on that
+    branch instead of the none it asked for.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a count of attempts >= 1, got {value!r}")
+
+
+def _margin(value: float) -> None:
+    """Reject a margin that would invert what "improved" means."""
+    numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if not numeric or not math.isfinite(value) or value < 0:
+        raise ValueError(f"margin must be a finite number >= 0, got {value!r}")
 
 
 def _child_counts(tree: DiscoveryTree) -> dict[str, int]:

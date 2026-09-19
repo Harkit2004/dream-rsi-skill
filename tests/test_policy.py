@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from dream_rsi.adapters.evaluator import EvalResult, ScoreDirection
 from dream_rsi.adapters.toy_search import ToySearchAgent, ToySearchEvaluator, plan_source
 from dream_rsi.orchestrator import ExplorationPolicy, RolloutConfig, run_rollout
 from dream_rsi.policy import (
@@ -26,6 +27,10 @@ from dream_rsi.policy import (
     BudgetAwarePolicy,
     GreedyBestFirstPolicy,
     OptimalPolicy,
+    branch_failed_hard,
+    branch_promising,
+    probe_improved_vs_baseline,
+    probe_improved_vs_parent,
 )
 from dream_rsi.replay import STOP_EMPTY_BATCH, ReplaySimulator
 from dream_rsi.scoring import replay_score
@@ -497,3 +502,279 @@ def test_importing_the_policy_module_reaches_no_agent_and_no_evaluator() -> None
         name for name in completed.stdout.split() if name.startswith("dream_rsi.adapters")
     )
     assert not adapters, f"importing dream_rsi.policy pulled in {', '.join(adapters)}"
+
+
+def _branch(*scores: float | None) -> tuple[DiscoveryTree, str]:
+    """A tree holding one branch off the root whose attempts scored ``scores``, in order.
+
+    Returns the tree and the id of the branch's tip, which is what a policy
+    would have as a frontier. No scores at all means the tip is the root.
+    """
+    tree = DiscoveryTree.with_root()
+    node_id = tree.root_id
+    for score in scores:
+        node_id = tree.add_child(node_id, score=score).id
+    return tree, node_id
+
+
+@pytest.mark.parametrize(
+    ("parent_score", "score", "improved"),
+    [
+        (5.0, 7.0, True),
+        (5.0, 5.0, False),
+        (5.0, 3.0, False),
+        (5.0, None, False),
+        (None, 7.0, True),
+    ],
+)
+def test_a_probe_improves_on_its_parent_only_when_it_measured_something_better(
+    parent_score: float | None, score: float | None, improved: bool
+) -> None:
+    """``delta_vs_parent`` as a signal (§B.2): did this attempt gain on the one it resumed from?
+
+    The cases that go wrong if the comparison is written carelessly: a tie is
+    not a gain, and an attempt whose evaluation produced no measurement did not
+    improve on anything — reading an unscored probe as a zero would make every
+    hard failure an improvement on a negative canonical score, which is every
+    lower-is-better task.
+    """
+    tree, node_id = _branch(parent_score, score)
+
+    assert probe_improved_vs_parent(tree, node_id) is improved
+
+
+def test_a_probe_measured_where_its_parent_could_not_counts_as_a_gain() -> None:
+    """The root is not a probe, and a repair is not nothing.
+
+    A branch's first attempt resumes from the initial workspace, which carries
+    no ``s_v``, and an attempt that recovers a measurement after its parent
+    failed is the "prior repair outcome" §B.2 ranks on. Both read as an
+    improvement over nothing; the root itself is neither a probe nor has a
+    parent to gain on.
+    """
+    tree, tip = _branch(None, 4.0)
+
+    assert probe_improved_vs_parent(tree, tip)
+    assert not probe_improved_vs_parent(tree, tree.root_id)
+
+
+def test_a_margin_asks_for_more_than_a_bare_improvement() -> None:
+    """The threshold is a parameter, so a caller can demand a gain worth having.
+
+    A helper that ignored its margin would report every rounding-sized gain as
+    an improvement, and a policy tuned on it would keep refining a branch that
+    has flattened out.
+    """
+    tree, tip = _branch(5.0, 7.0)
+
+    assert probe_improved_vs_parent(tree, tip, margin=1.0)
+    assert not probe_improved_vs_parent(tree, tip, margin=3.0)
+
+
+@pytest.mark.parametrize(
+    ("score", "baseline", "improved"),
+    [
+        (7.0, 5.0, True),
+        (5.0, 5.0, False),
+        (3.0, 5.0, False),
+        (None, 5.0, False),
+        (7.0, None, True),
+    ],
+)
+def test_a_probe_improves_on_the_baseline_only_when_it_beat_it(
+    score: float | None, baseline: float | None, improved: bool
+) -> None:
+    """``delta_vs_baseline`` against ``question.baseline_score`` (§B.1).
+
+    A task that states no reference score has nothing for a probe to fall short
+    of, so any measurement improves on it; a probe with no measurement improves
+    on nothing, reference or not.
+    """
+    tree, node_id = _branch(score)
+
+    assert probe_improved_vs_baseline(tree, node_id, baseline) is improved
+
+
+def test_the_signals_compare_canonical_scores_on_a_lower_is_better_task() -> None:
+    """Score direction is settled before a signal sees a node, and stays settled.
+
+    A node's ``s_v`` is canonical larger-is-better (§3); the task's own number
+    survives in its diagnostics, and the baseline a task states is in the task's
+    units, so a caller converts it the same way. A signal that reached back for
+    ``diagnostics["raw_score"]`` — or that assumed the raw metric ran
+    larger-is-better — would call the slower kernel the better one on every
+    lower-is-better task in §4.
+    """
+    direction = ScoreDirection.LOWER_IS_BETTER
+    tree = DiscoveryTree.with_root()
+    parent = tree.add_child(
+        tree.root_id, **EvalResult(score=7.0, correct=True).to_node_fields(direction)
+    )
+    faster = tree.add_child(
+        parent.id, **EvalResult(score=3.0, correct=True).to_node_fields(direction)
+    )
+    baseline = direction.to_canonical(5.0)
+
+    assert probe_improved_vs_parent(tree, faster.id)
+    assert probe_improved_vs_baseline(tree, faster.id, baseline)
+    assert not probe_improved_vs_baseline(tree, parent.id, baseline)
+
+
+@pytest.mark.parametrize(
+    ("scores", "hard"),
+    [
+        ((), False),
+        ((5.0,), False),
+        ((None,), False),
+        ((None, None), True),
+        ((5.0, None, None), True),
+        ((None, None, 5.0), False),
+    ],
+)
+def test_a_branch_has_failed_hard_only_after_a_run_of_attempts_measured_nothing(
+    scores: tuple[float | None, ...], hard: bool
+) -> None:
+    """§B.2: "Do not infer algorithmic failure from one such error."
+
+    One attempt that produced no measurement is a repairable failure, not a
+    hard-unrecoverable branch — a signal that fired on it would have a policy
+    write off every branch whose first attempt did not compile. And "a later
+    successful result reopens the branch": the signal describes the current
+    failure episode at the tip, not everything that ever went wrong on the path.
+    """
+    tree, node_id = _branch(*scores)
+
+    assert branch_failed_hard(tree, node_id) is hard
+
+
+def test_how_long_a_failure_episode_must_be_is_a_parameter() -> None:
+    """The threshold the paper leaves open is the caller's to set.
+
+    A run of two failures is hard under the default and not under a caller who
+    waits for three; a signal with the number baked in could not be swept.
+    """
+    tree, tip = _branch(None, None)
+
+    assert branch_failed_hard(tree, tip)
+    assert not branch_failed_hard(tree, tip, streak=3)
+
+
+@pytest.mark.parametrize(
+    ("scores", "promising"),
+    [
+        ((), False),
+        ((5.0,), True),
+        ((5.0, 3.0), True),
+        ((5.0, None), True),
+        ((5.0, 3.0, 2.0), False),
+        ((5.0, 3.0, 4.0), True),
+        ((5.0, None, None), False),
+        ((None, None), False),
+    ],
+)
+def test_a_branch_is_promising_while_something_on_it_is_still_going_right(
+    scores: tuple[float | None, ...], promising: bool
+) -> None:
+    """A branch worth refining has a successful anchor and has not stalled (§B.2).
+
+    The two failure modes this pins apart. "A repairable latest failure must not
+    erase its historical successful anchor" — one regression or one failure at
+    the tip leaves the branch promising, so a policy does not drop the branch
+    holding the best result so far over a single bad attempt. And "repeatedly
+    unpromising after sufficient valid evidence" — a run of attempts that
+    neither gained nor measured anything does stop being promising, so a policy
+    is not pinned to a branch that has flattened out. A branch on which nothing
+    ever evaluated has no anchor at all and was never promising.
+    """
+    tree, node_id = _branch(*scores)
+
+    assert branch_promising(tree, node_id) is promising
+
+
+def test_how_long_a_branch_may_stall_is_a_parameter() -> None:
+    """The patience side of the same gap: how much unimproved evidence is enough."""
+    tree, tip = _branch(5.0, 3.0, 2.0)
+
+    assert not branch_promising(tree, tip)
+    assert branch_promising(tree, tip, patience=3)
+
+
+SIGNALS = (
+    ("branch_promising", lambda tree, node_id: branch_promising(tree, node_id)),
+    ("branch_failed_hard", lambda tree, node_id: branch_failed_hard(tree, node_id)),
+    ("probe_improved_vs_parent", lambda tree, node_id: probe_improved_vs_parent(tree, node_id)),
+    (
+        "probe_improved_vs_baseline",
+        lambda tree, node_id: probe_improved_vs_baseline(tree, node_id, 0.0),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "signal", [signal for _, signal in SIGNALS], ids=[name for name, _ in SIGNALS]
+)
+def test_a_signal_refuses_a_node_the_policy_has_not_been_shown(
+    signal: Any,
+) -> None:
+    """Prefix-observability holds inside the signals too (§3, §B.2's prefix-only rule).
+
+    A signal that answered about a recorded node the policy has not revealed
+    would let a dreamed policy read the world's unrevealed scores through the
+    vocabulary it is supposed to reason in — and the replay would score it on
+    outcomes it never paid ``N`` for. Answering ``False`` would be the worse
+    failure of the two, because nothing downstream could tell that apart from a
+    real answer, so this fails loudly and names the node.
+    """
+    world = ReplaySimulator(_load("narrow_deep"))
+    run = world.start()
+    run.reveal((world.root_id,))
+    revealed = run.revealed
+    shown = {node.id for node in revealed.iter_nodes()}
+    hidden = next(node.id for node in _load("narrow_deep").iter_nodes() if node.id not in shown)
+
+    with pytest.raises(ValueError, match=hidden):
+        signal(revealed, hidden)
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda tree, node_id: branch_promising(tree, node_id, patience=0),
+        lambda tree, node_id: branch_failed_hard(tree, node_id, streak=0),
+        lambda tree, node_id: probe_improved_vs_parent(tree, node_id, margin=-1.0),
+        lambda tree, node_id: probe_improved_vs_baseline(tree, node_id, 0.0, margin=-1.0),
+    ],
+    ids=["patience", "streak", "parent margin", "baseline margin"],
+)
+def test_a_signal_refuses_a_threshold_that_would_not_mean_what_it_says(call: Any) -> None:
+    """A threshold out of range is a caller's bug, and a silent one if it is allowed.
+
+    A window of zero attempts reads as ``attempts[-0:]``, which is the whole
+    branch rather than none of it — so a policy asking for no patience at all
+    would get a signal weighing every attempt it ever made. A negative margin
+    inverts what "improved" means. Neither would raise on its own.
+    """
+    tree, tip = _branch(5.0, None)
+
+    with pytest.raises(ValueError):
+        call(tree, tip)
+
+
+def test_the_greedy_baseline_passes_over_a_frontier_that_has_stopped_improving() -> None:
+    """Issue #11's "done when": a baseline rewritten to decide in the signals' vocabulary.
+
+    §B.2 ranks frontiers on the whole branch trajectory — "score trend,
+    regressions, ... explored versus remaining depth" — not on the anchor
+    alone. Here the best-anchored branch has spent two attempts going backwards
+    while a rival is still gaining, and a policy reading only the anchor would
+    keep pouring the width into the stalled one. Passing it over is a
+    deprioritisation and not a closure: it stays live, and wins the round back
+    as soon as the rival stalls too.
+    """
+    tree = DiscoveryTree.with_root()
+    stalled = tree.add_child(tree.root_id, score=9.0)
+    worse = tree.add_child(stalled.id, score=4.0)
+    tree.add_child(worse.id, score=3.0)
+    rival = tree.add_child(tree.root_id, score=6.0)
+
+    assert GreedyBestFirstPolicy().select(tree, eligible_nodes(tree), 1) == (rival.id,)
