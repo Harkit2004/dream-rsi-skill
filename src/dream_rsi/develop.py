@@ -391,9 +391,11 @@ def _replay_text(replay: WorldReplay) -> str:
     result = replay.result
     scores = {point.node_id: point.score for point in result.curve}
     lines = [
-        f"- {replay.world}: V_i={_number(replay.score)} "
-        f"attainment={_number(result.attainment)} revealed={result.revealed} "
-        f"rounds={result.round_count} stopped={result.stop_reason}"
+        (
+            f"- {replay.world}: V_i={_number(replay.score)} "
+            f"attainment={_number(result.attainment)} revealed={result.revealed} "
+            f"rounds={result.round_count} stopped={result.stop_reason}"
+        )
     ]
     lines += [
         f"    round {round_.index}: "
