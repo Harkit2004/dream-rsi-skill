@@ -177,7 +177,7 @@ def test_a_pool_with_nothing_in_it_reports_nothing(tmp_path: Path) -> None:
     assert pool.stats() == PoolStats(trees=0, nodes=0, bytes=0)
 
 
-def test_by_default_a_pool_is_dreamed_over_whole(tmp_path: Path) -> None:
+def test_by_default_a_pool_is_dreamed_over_whole() -> None:
     """The honest default the issue asks for: no tree is dropped unasked.
 
     Subsampling is a cost control, and one that silently discarded history would
