@@ -31,12 +31,12 @@ Reveal is **strictly prefix-observable**: the policy's selectable set is the roo
 ## Scoring (Equation 1)
 
 ```
-V_i^m = max_v(s_v) − β₁·N_i^m + β₂·(N_i^m / max{1, k})
+V_i^m = max_v(s_v) − β₁·N_i^m + β₂·(N_i^m / max{1, k_i^{m,★}})
 ```
 
 - `max_v(s_v)` — attainment over revealed nodes
 - `N_i^m` — count of revealed nodes, standing in for execution cost
-- third term — batching efficiency reward, with `k` the batch width
+- third term — batching efficiency reward, with `k_i^{m,★}` the number of decision rounds the replay completed at termination (§3), *not* the width of any one batch. It rewards the average number of attempts per round, so the same reveals grouped into fewer rounds score higher.
 
 `PAPER-GAP:` the method text does not fix β₁ and β₂. Treat them as configuration with documented defaults, and make the sensitivity visible in any reported result.
 
