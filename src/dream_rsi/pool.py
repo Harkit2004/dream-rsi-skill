@@ -115,15 +115,21 @@ class SimulatorPool:
 
         Sorted rather than in directory order so two sessions listing the same
         pool list it the same way (working rule 5); the driver's own names sort
-        into the order the cycles ran.
+        into the order the cycles ran. Only files this pool could have written
+        are listed: the staging file of an interrupted add is not a tree, and
+        neither is anything this pool would refuse to name.
         """
         if not self._directory.is_dir():
             return ()
         return tuple(
             sorted(
-                path.name[: -len(TREE_SUFFIX)]
-                for path in self._directory.iterdir()
-                if path.is_file() and path.name.endswith(TREE_SUFFIX)
+                name
+                for name in (
+                    path.name[: -len(TREE_SUFFIX)]
+                    for path in self._directory.iterdir()
+                    if path.is_file() and path.name.endswith(TREE_SUFFIX)
+                )
+                if _nameable(name)
             )
         )
 
@@ -187,9 +193,14 @@ class SimulatorPool:
         A name is a name: the pool owns its directory, and a name that is a path
         would write a tree outside it and list a pool that cannot be read back.
         """
-        if not name or name != Path(name).name or name.startswith("."):
+        if not _nameable(name):
             raise PoolError(f"a tree name must be a plain filename, got {name!r}")
         return self._directory / f"{name}{TREE_SUFFIX}"
+
+
+def _nameable(name: str) -> bool:
+    """Whether ``name`` names a tree in a pool: a plain filename, and not hidden."""
+    return bool(name) and name == Path(name).name and not name.startswith(".")
 
 
 def subsample(names: Sequence[str], config: PoolConfig | None = None) -> tuple[str, ...]:

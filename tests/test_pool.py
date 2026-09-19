@@ -145,6 +145,24 @@ def test_stats_match_a_manual_count(tmp_path: Path) -> None:
     )
 
 
+def test_a_file_the_pool_did_not_write_is_not_a_world(tmp_path: Path) -> None:
+    """Whatever the pool lists, it can load — so it lists only its own trees.
+
+    A run directory is a place people and other tools write into: a note, an
+    editor's leavings, a dotfile the filesystem put there. A pool that listed
+    everything it found would name worlds it then refuses to load, and counting
+    the pool — the one thing a run does with it every cycle — would raise
+    instead of reporting a size.
+    """
+    pool = _filled(tmp_path / "pool", {"cycle_000": 3})
+    (tmp_path / "pool" / "notes.txt").write_text("not a tree", encoding="utf-8")
+    (tmp_path / "pool" / ".hidden.json").write_text("not a tree either", encoding="utf-8")
+
+    assert pool.names() == ("cycle_000",)
+    assert pool.stats().trees == 1
+    assert [world.name for world in pool.worlds()] == ["cycle_000"]
+
+
 def test_a_pool_with_nothing_in_it_reports_nothing(tmp_path: Path) -> None:
     """A run's first cycle dreams over a pool that was empty a moment ago.
 
