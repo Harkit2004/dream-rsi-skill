@@ -290,8 +290,10 @@ class DreamReport:
         cap = "default" if self.config.max_rounds is None else self.config.max_rounds
         lines = [
             f"dreaming round: {len(self.versions)} version(s) x {len(self.worlds)} world(s)",
-            f"objective: β₁={weights.cost} β₂={weights.parallelism} | "
-            f"W={self.config.width} | K₂={cap} | seed={self.config.seed}",
+            (
+                f"objective: β₁={weights.cost} β₂={weights.parallelism} | "
+                f"W={self.config.width} | K₂={cap} | seed={self.config.seed}"
+            ),
             "",
             *(
                 "  ".join(cell.rjust(width) for cell, width in zip(row, widths))
@@ -374,7 +376,7 @@ def _replay(candidate: PolicyCandidate, world: ReplayWorld, config: DreamConfig)
             seed=config.seed,
         )
         result = run.result()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the whole point is to not propagate
         return WorldReplay(
             world=world.name,
             score=None,
