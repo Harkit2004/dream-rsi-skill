@@ -13,6 +13,12 @@ rollout"):
   from, and the next round decides again on the extended tree;
 * the rollout ends when the policy selects an empty batch or the budget runs out.
 
+A policy that plans its own grid — §B.2's optional ``plan_grid`` (issue #21) — is
+asked for one before the first round, and the plan then bounds how many branches
+the rollout may open, how deep it may refine one, and how wide a round is offered
+to run: "the runtime grid is the hard bound: controller thresholds may use less,
+but can never create branches or attempts beyond the effective plan."
+
 Attaching children never depends on the order the workers happen to finish in,
 so the number of workers changes how long a rollout takes and nothing about the
 tree it records.
@@ -38,6 +44,7 @@ from dream_rsi.adapters.evaluator import EvalResult, TaskEvaluator, safe_evaluat
 from dream_rsi.adapters.fake_agent import FakeAgent
 from dream_rsi.adapters.toy_evaluator import ToyEvaluator
 from dream_rsi.cost import OnlineCost
+from dream_rsi.policy import GridPlan, GridPlanningContext
 from dream_rsi.tree import DiscoveryTree, Node, eligible_nodes
 from dream_rsi.workspace import SnapshotStore
 
@@ -95,6 +102,18 @@ class RolloutConfig:
     max_nodes: int | None = 64
     max_seconds: float | None = None
 
+    # PAPER-GAP: §B.2 has the runner validate a policy's grid plan against
+    # ``context.hard_max_branch_count`` and ``context.hard_max_refine_count``
+    # without saying what either is. We take §4's own largest reported grid — 32
+    # parallel workspaces with up to 20 refinement steps — as the ceiling, so a
+    # plan this runner honours is one the paper's own experiments would have run,
+    # and anything wider or deeper is a policy that has to say so explicitly by
+    # raising the cap. They bound the plan only: a rollout without one is bounded
+    # by ``max_rounds`` and ``max_nodes`` as before. Revisit if the authors'
+    # implementation lands (see references/method.md).
+    max_branches: int = 32
+    max_refinements: int = 20
+
     # Seeds the per-attempt seeds, so a rollout against a deterministic agent is
     # reproducible (AGENTS.md rule 5).
     seed: int = 0
@@ -102,6 +121,12 @@ class RolloutConfig:
     def __post_init__(self) -> None:
         if self.workers < 1:
             raise ValueError(f"workers must be at least 1 (§3: W ≥ 1), got {self.workers}")
+        if self.max_branches < 1:
+            # §B.2 validates ``1 <= W``, so a cap below one is a runner no plan
+            # can satisfy rather than a runner that plans nothing.
+            raise ValueError(f"max_branches must be at least 1, got {self.max_branches}")
+        if self.max_refinements < 0:
+            raise ValueError(f"max_refinements must not be negative, got {self.max_refinements}")
         if self.max_rounds < 0:
             raise ValueError(f"max_rounds must not be negative, got {self.max_rounds}")
         if self.max_nodes is not None and self.max_nodes < 0:
@@ -176,9 +201,15 @@ class ExplorationPolicy(Protocol):
     """The paper's shared decision interface, as the rollout loop needs it (§3).
 
     Implementations are structural: anything with this one method drives a
-    rollout. The full :class:`OptimalPolicy` surface the policy-development agent
-    writes against — ``solve``, the observation signals, ``plan_grid`` — is issue
-    #10; this is the part the online loop calls.
+    rollout. The rest of the :class:`~dream_rsi.policy.OptimalPolicy` surface the
+    policy-development agent writes against — ``solve`` and the observation
+    signals — is issue #10, and the online loop calls none of it.
+
+    One more method it does call where a policy defines it:
+    ``plan_grid(context: GridPlanningContext) -> GridPlan``, §B.2's grid plan
+    (issue #21), asked for once before the rollout opens anything. It is not
+    declared here because it is optional — a protocol that required it would be
+    one the baselines do not satisfy — so :func:`_plan` looks for it instead.
     """
 
     def select(
@@ -236,6 +267,15 @@ def run_rollout(
     in this repo are stateless.
     """
     config = config or RolloutConfig()
+    # Before the grid exists, and once: §B.2's plan_grid "runs **before** a new
+    # live grid is created" and "must never inspect a current episode's
+    # outcomes", which a hook called per round could.
+    plan = _plan(policy, config)
+    # The grid is ``branch_count`` branches wide, so a round offered more
+    # parallelism than that is offered workers the plan has nothing to spend them
+    # on. §B.2: "controller thresholds may use less, but can never create
+    # branches or attempts beyond the effective plan."
+    width = config.workers if plan is None else min(config.workers, plan.branch_count)
     tree = DiscoveryTree.with_root(
         snapshot_ref=None if snapshots is None else snapshots.capture(workspace)
     )
@@ -255,8 +295,8 @@ def run_rollout(
                 stop_reason = STOP_MAX_NODES
                 break
 
-            eligible = eligible_nodes(tree)
-            batch = tuple(policy.select(tree, eligible, config.workers))
+            eligible = _eligible(tree, plan)
+            batch = tuple(policy.select(tree, eligible, width))
             _check_batch(batch, eligible)
             if not batch:
                 stop_reason = STOP_EMPTY_BATCH
@@ -266,7 +306,8 @@ def run_rollout(
             # attempts, and stopping a round short spends exactly what is left
             # instead of leaving it unused. The round still records the width the
             # policy asked for.
-            scheduled = batch if remaining is None else batch[:remaining]
+            admitted = _admitted(tree, batch, plan)
+            scheduled = admitted if remaining is None else admitted[:remaining]
             jobs = [
                 (
                     _context(tree, parent_id, problem, workspace, config.seed + attempts + offset),
@@ -307,6 +348,117 @@ def run_rollout(
         # which of its nodes reached an evaluator.
         cost=OnlineCost(agent_calls=attempts, evaluations=evaluations),
     )
+
+
+def _plan(policy: ExplorationPolicy, config: RolloutConfig) -> GridPlan | None:
+    """The grid this policy planned, or ``None`` where it plans none (§B.2).
+
+    The hook is optional here (issue #21) — §B.2 requires every policy to
+    implement it, and the three baselines in :mod:`dream_rsi.policy` do not — so
+    a policy that does not define it is run ungridded, exactly as before. What it
+    does define is validated here rather than trusted: §B.2 puts the check on the
+    runner ("the runner validates ``1 <= W <= context.hard_max_branch_count`` and
+    ``0 <= R <= context.hard_max_refine_count``"), and this is the runner.
+    """
+    plan_grid = getattr(policy, "plan_grid", None)
+    if not callable(plan_grid):
+        return None
+    context = GridPlanningContext(
+        hard_max_branch_count=config.max_branches,
+        hard_max_refine_count=config.max_refinements,
+        max_workers=config.workers,
+    )
+    plan = plan_grid(context)
+    if not isinstance(plan, GridPlan):
+        # §B.2: "It must always return a non-``None`` ``GridPlan``: do not
+        # inherit the template stub and do not delegate grid choice to the
+        # runner's fallback." A policy that defined the hook and answered with
+        # something else planned nothing, and the rollout it would get is not the
+        # one it asked for.
+        raise ValueError(
+            f"plan_grid must return a GridPlan, got {plan!r}; a policy that plans "
+            f"no grid does not define plan_grid at all"
+        )
+    _count("branch_count", plan.branch_count, 1, config.max_branches)
+    _count("refine_count", plan.refine_count, 0, config.max_refinements)
+    return plan
+
+
+def _count(name: str, value: int, low: int, high: int) -> None:
+    """Reject a grid dimension the runner cannot open (§B.2's validation)."""
+    if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+        raise ValueError(
+            f"a grid plan's {name} must be a whole number in [{low}, {high}], got {value!r}"
+        )
+
+
+def _eligible(tree: DiscoveryTree, plan: GridPlan | None) -> tuple[str, ...]:
+    """``A(T)``, narrowed to what the planned grid still has room for (§B.2).
+
+    Narrowed rather than policed afterwards, because ``A(T)`` is the whole of
+    what a policy is told it may do: a root the grid has no branch left for, or a
+    leaf at the plan's full depth, is not an action this rollout can take, and
+    offering it would have the policy spend rounds on selections the runner then
+    dropped. With no plan the set is the paper's own, unchanged.
+
+    PAPER-GAP: §B.2's grid is branches × attempts, in which the only thing a
+    branch can do is get one attempt deeper, while a tree here lets one leaf be
+    refined twice in a round and fork. We read ``refine_count`` as the depth
+    bound it is described as — "the number of refinements allowed after each
+    root" — so every frontier of a branch is capped at ``R`` refinements and a
+    fork costs attempts rather than depth; bounding a branch's *nodes* instead
+    would make the width of a fork the thing that ends a branch. Revisit if the
+    authors' implementation lands (see references/method.md).
+    """
+    eligible = eligible_nodes(tree)
+    if plan is None:
+        return eligible
+    opened = len(tree.children(tree.root_id))
+    return tuple(
+        node_id
+        for node_id in eligible
+        if (
+            opened < plan.branch_count
+            if node_id == tree.root_id
+            else _depth(tree, node_id) <= plan.refine_count
+        )
+    )
+
+
+def _admitted(
+    tree: DiscoveryTree, batch: Sequence[str], plan: GridPlan | None
+) -> tuple[str, ...]:
+    """The selections of ``batch`` the grid has room to open this round (§B.2).
+
+    Only the root needs this, and only for the repeats: :func:`_eligible` already
+    took it out of ``A(T)`` once the branches were all opened, but a batch may
+    name it several times — that is how one round opens several branches — and
+    the last of those repeats is where a two-branch grid would become a
+    three-branch one. Dropped rather than rejected, for the reason the node
+    budget above truncates rather than failing: asking is legal, and the grid is
+    a bound on what gets created.
+    """
+    if plan is None:
+        return tuple(batch)
+    room = plan.branch_count - len(tree.children(tree.root_id))
+    admitted: list[str] = []
+    for node_id in batch:
+        if node_id == tree.root_id:
+            if room <= 0:
+                continue
+            room -= 1
+        admitted.append(node_id)
+    return tuple(admitted)
+
+
+def _depth(tree: DiscoveryTree, node_id: str) -> int:
+    """How many attempts deep ``node_id`` sits: the root is 0, a branch's first 1."""
+    depth = 0
+    parent = tree.node(node_id).parent_id
+    while parent is not None:
+        depth += 1
+        parent = tree.node(parent).parent_id
+    return depth
 
 
 def _check_batch(batch: Sequence[str], eligible: Sequence[str]) -> None:

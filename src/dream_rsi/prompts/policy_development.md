@@ -67,6 +67,35 @@ positional argument in `__init__`.
 * `dream_rsi.policy` also exports the signals §B.2 names — `branch_promising`,
   `branch_failed_hard`, `probe_improved_vs_parent`, `probe_improved_vs_baseline`.
 
+### Planning the grid (optional)
+
+You may also plan the grid the *online* rollout that deploys you will run on:
+
+    from dream_rsi.policy import GridPlan
+
+
+    class $policy_name(BasePolicy):
+        def plan_grid(self, context):
+            return GridPlan(branch_count=..., refine_count=..., reason="...")
+
+It is asked for once, before that rollout opens anything, and never during one —
+it makes no within-episode decision and is not called while you are replaying a
+frozen world, so it cannot read a current episode's outcomes. `branch_count` is
+how many branches may be opened off the root and `refine_count` how many
+refinements are allowed after each of them, so a branch is at most
+`refine_count + 1` attempts deep. Both are whole numbers the runner validates
+against `context`: `1 <= branch_count <= context.hard_max_branch_count` and
+`0 <= refine_count <= context.hard_max_refine_count`. `context.max_workers` is
+the `W` that grid will be explored under. A plan outside those bounds, or a
+`plan_grid` that returns anything but a `GridPlan`, stops the rollout, so return
+one on every path and give it a short factual `reason`.
+
+The grid is a hard bound and not a target: it can never create branches or
+attempts beyond the plan, and `choose` still decides which of the nodes on offer
+to open, refine or stop at. Omit the method entirely if you do not want to plan
+one — a policy without it runs unbounded by any grid, which is what the version
+you are revising does unless its source says otherwise.
+
 ## Hard constraints
 
 * **Prefix-only.** Never use unrevealed scores, a true optimum, hardcoded winning
