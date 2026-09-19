@@ -186,8 +186,10 @@ def _load_policy(source: str, config: dict[str, Any], policy_name: str) -> Any:
     """
     namespace: dict[str, Any] = {"__name__": "dream_rsi_policy_candidate"}
     # The point of this module: this is the untrusted code, and it runs with the
-    # limits of :func:`_install_limits` already in force.
-    exec(compile(source, "<policy>", "exec"), namespace)
+    # limits of :func:`_install_limits` already in force. Executing a model's
+    # policy is the design (§3, §B.2) — the sandbox is the answer to it, and this
+    # is the one place in the package that does it.
+    exec(compile(source, "<policy>", "exec"), namespace)  # noqa: S102
 
     name = namespace.get("NAME", policy_name)
     if not isinstance(name, str):

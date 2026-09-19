@@ -27,9 +27,9 @@ from dream_rsi.dream import DreamConfig, ReplayWorld, dream
 from dream_rsi.policy import GreedyBestFirstPolicy
 from dream_rsi.replay import ReplaySimulator
 from dream_rsi.sandbox import (
+    SandboxedPolicy,
     SandboxError,
     SandboxLimits,
-    SandboxedPolicy,
     sandboxed_candidate,
 )
 from dream_rsi.tree import DiscoveryTree

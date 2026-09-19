@@ -283,7 +283,9 @@ class SandboxedPolicy:
             return
         self._finalizer()
 
-    def __enter__(self) -> SandboxedPolicy:
+    # ``Self`` would be the annotation, and it needs Python 3.11 while this
+    # package supports 3.10 (``pyproject.toml``).
+    def __enter__(self) -> SandboxedPolicy:  # noqa: PYI034
         return self
 
     def __exit__(self, *exc_info: object) -> None:
