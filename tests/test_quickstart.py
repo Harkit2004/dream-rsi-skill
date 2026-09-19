@@ -20,13 +20,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+from dream_rsi.run import CYCLE_TEMPLATE, CYCLES_DIRNAME, POLICY_FILENAME, RECORD_FILENAME
+
 REPO = Path(__file__).resolve().parents[1]
 README = REPO / "README.md"
 
-# The heading the quickstart lives under, and the directory the documented
-# command writes to (relative to wherever it is run from).
+# The heading the quickstart lives under.
 HEADING = "## Quickstart"
-RUN_DIRNAME = Path("runs") / "quickstart"
 
 # The two columns of the report that measure the machine rather than the run:
 # a duration is not reproducible and the README cannot promise one.
@@ -78,25 +78,39 @@ def _mask(report: str) -> str:
     return "\n".join(masked).strip()
 
 
-def _quickstart(tmp_path: Path) -> subprocess.CompletedProcess[str]:
-    """Run the README's command from an empty directory, as a reader would.
+def _arguments() -> list[str]:
+    """The README's quickstart command, minus the interpreter it names.
 
-    The documented ``python`` becomes the interpreter running the tests, so the
-    command is exercised against the checkout under test rather than against
-    whatever ``python`` happens to be first on this machine's path. Everything
-    after it is the README's, argument for argument.
+    The documented ``python`` is dropped in favour of the interpreter running
+    the tests, so the command is exercised against the checkout under test
+    rather than against whatever ``python`` happens to be first on this
+    machine's path. Everything after it is the README's, argument for argument.
     """
     command = _block(_section(HEADING), "bash").strip()
     assert "\n" not in command, f"the quickstart is one command, found:\n{command}"
     executable, *arguments = command.split()
     assert executable in ("python", "python3"), f"quickstart runs {executable!r}, not python"
+    return arguments
+
+
+def _quickstart(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Run the README's command from an empty directory, as a reader would."""
     return subprocess.run(
-        [sys.executable, *arguments],
+        [sys.executable, *_arguments()],
         capture_output=True,
         text=True,
         cwd=tmp_path,
         check=False,
     )
+
+
+def _cycles(tmp_path: Path) -> Path:
+    """The cycle directories the documented command wrote, wherever it puts them.
+
+    Off the command's own last argument, which is the run directory the README
+    tells the reader to pass, so moving it in the README moves it here too.
+    """
+    return tmp_path / _arguments()[-1] / CYCLES_DIRNAME
 
 
 def test_the_documented_quickstart_command_runs_and_exits_zero(tmp_path: Path) -> None:
@@ -110,7 +124,7 @@ def test_the_documented_quickstart_command_runs_and_exits_zero(tmp_path: Path) -
     completed = _quickstart(tmp_path)
 
     assert completed.returncode == 0, completed.stderr
-    assert (tmp_path / RUN_DIRNAME).is_dir()
+    assert _cycles(tmp_path).is_dir()
 
 
 def test_the_documented_output_is_what_the_quickstart_actually_prints(tmp_path: Path) -> None:
@@ -146,15 +160,15 @@ def test_the_quickstart_shows_the_policy_improving(tmp_path: Path) -> None:
     """
     completed = _quickstart(tmp_path)
     assert completed.returncode == 0, completed.stderr
-    cycles = tmp_path / RUN_DIRNAME / "cycles"
+    first = _cycles(tmp_path) / CYCLE_TEMPLATE.format(0)
+    second = _cycles(tmp_path) / CYCLE_TEMPLATE.format(1)
 
-    record = json.loads((cycles / "cycle_000" / "cycle.json").read_text(encoding="utf-8"))
-    selection = record["selection"]
+    selection = json.loads((first / RECORD_FILENAME).read_text(encoding="utf-8"))["selection"]
     assert selection["winner"] != selection["incumbent"]
     assert selection["score"] > selection["incumbent_score"]
 
-    before = (cycles / "cycle_000" / "policy.py").read_text(encoding="utf-8").splitlines()
-    after = (cycles / "cycle_001" / "policy.py").read_text(encoding="utf-8").splitlines()
+    before = (first / POLICY_FILENAME).read_text(encoding="utf-8").splitlines()
+    after = (second / POLICY_FILENAME).read_text(encoding="utf-8").splitlines()
     assert before != after
 
     # Stripped, because the report indents the diff under the cycle it belongs
