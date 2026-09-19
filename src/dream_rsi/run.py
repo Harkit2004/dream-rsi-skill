@@ -455,7 +455,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             # The width a version is offered while dreaming is the width the next
             # rollout will actually run at, or Equation 1's parallelism term
             # rewards batching the online loop cannot spend (``dream.DreamConfig``).
-            dreaming=DreamConfig(width=args.workers),
+            # The seed is the run's, and unlike the rollout's it is not offset per
+            # cycle: replay reseeds each policy-world pair from it (§3), and two
+            # cycles dreaming over the same world have to score it the same way
+            # for their V^m to be comparable at all.
+            dreaming=DreamConfig(width=args.workers, seed=args.seed),
             versions=args.versions,
         ),
     )
