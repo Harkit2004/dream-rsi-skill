@@ -26,6 +26,8 @@ A completed tree becomes a **frozen replay world**. A new policy navigating it r
 
 Reveal is **strictly prefix-observable**: the policy's selectable set is the root (unopened branches) plus the leaves of branches it has already opened. The child lookup returns the pre-recorded children if they exist, otherwise the empty set. Nothing is generated during replay.
 
+A batch repeats the root and nothing else. §3's action is a set `C ⊆ A(T)`, which cannot express the wide root fan-out §4 runs, so a batch here is a sequence — but only the root may appear in it twice, exactly as §B.2 tells the policy ("may contain several roots and/or one frontier from each opened branch", "no duplicate ids"). That is what keeps every recorded tree replayable: a non-root node never gains a second child, which is the one case §3 gives a reveal rule for ("for `v ≠ r`, `Child(v; T_i, T_i^{m,k})` is `v`'s unique recorded child"). A tree recorded elsewhere that does branch off a non-root node is still replayable, but only the round that first reveals such a node can reach the rest of its children, by naming it again in that same batch: eligibility is fixed when the round begins, and once the round ends the node is no longer a leaf and has left `A(T)` for good (issue #31).
+
 → `src/dream_rsi/replay.py`
 
 ## Scoring (Equation 1)
