@@ -52,6 +52,7 @@ import math
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 from dream_rsi.tree import DiscoveryTree, Node, eligible_nodes
@@ -64,6 +65,8 @@ __all__ = [
     "BreadthFirstPolicy",
     "BudgetAwarePolicy",
     "GreedyBestFirstPolicy",
+    "GridPlan",
+    "GridPlanningContext",
     "OptimalPolicy",
     "Question",
     "branch_failed_hard",
@@ -115,6 +118,55 @@ class Question(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class GridPlan:
+    """How wide and how deep the next rollout's grid may be (§B.2, issue #21).
+
+    ``GridPlan(branch_count=W, refine_count=R)`` "creates branches ``0..W-1`` and
+    attempts ``0..R``; ``R`` is the number of refinements allowed after each
+    root" — so a branch is at most ``R + 1`` attempts deep, the first of them
+    being the one that opened it. Both "accept arbitrary integers, not a fixed
+    set of presets"; it is the runner that validates them against the caps in
+    the :class:`GridPlanningContext` it planned from
+    (``orchestrator.run_rollout``), and that enforces the grid as "the hard
+    bound: controller thresholds may use less, but can never create branches or
+    attempts beyond the effective plan".
+
+    ``reason`` is §B.2's "short, factual ``reason`` in every plan": the evidence
+    the width-versus-depth choice was made on, so a run that widened can say why.
+    """
+
+    branch_count: int
+    refine_count: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class GridPlanningContext:
+    """The prefix-safe facts a grid is planned from (§B.2, issue #21).
+
+    ``hard_max_branch_count`` and ``hard_max_refine_count`` are the caps the
+    runner validates a plan against, and ``max_workers`` is ``W``, the worker cap
+    the grid will actually be explored under.
+
+    PAPER-GAP: §B.2's context also carries ``history`` — "completed earlier live
+    manifests, including prior planned/effective grids, actual opened
+    width/depth, probe work, decision rounds, scores, and beta" — and replay's
+    structural support fields. Neither is here: the driver
+    (``dream_rsi.run``) keeps its cycle records in its own directory and does not
+    yet summarise them for a policy, and replay creates no grid to plan, so a
+    plan made here is made from the caps alone. A policy therefore sees the
+    "history is empty or insufficient" case §B.2 describes and answers it with
+    "an explicit conservative bootstrap plan derived from the context's
+    fallback/hard-cap fields". Revisit when the driver feeds its cycles in, and
+    if the authors' implementation lands (see references/method.md).
+    """
+
+    hard_max_branch_count: int
+    hard_max_refine_count: int
+    max_workers: int
+
+
 class OptimalPolicy(ABC):
     """The interface every candidate policy implements (§3, §B.2).
 
@@ -132,6 +184,17 @@ class OptimalPolicy(ABC):
     can drive a second rollout either way. A caller holding a seed still calls
     :meth:`reset` with it, because a self-reset has no seed to pass on — which
     is why the online driver should own this too (issue #36).
+
+    One method a subclass may add is deliberately absent here:
+    ``plan_grid(self, context: GridPlanningContext) -> GridPlan``, §B.2's
+    cross-cycle width-and-depth decision, which ``orchestrator.run_rollout``
+    calls once before it opens the grid. §B.2 has it inherited from a template
+    and overridden — "do not inherit the template stub" — while here it is
+    optional (issue #21), so it is not defined at all: a stub returning nothing
+    is exactly the thing the runner cannot tell from a policy that plans, and a
+    base class answering for every subclass would put the three baselines below
+    on a grid none of them chose. A policy that plans one defines it; a policy
+    that does not is run ungridded, and neither is told which it is.
     """
 
     def __init__(self, config: Mapping[str, Any] | None = None) -> None:

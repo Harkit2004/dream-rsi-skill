@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from dream_rsi.dream import DreamConfig, ReplayWorld, dream
-from dream_rsi.policy import GreedyBestFirstPolicy
+from dream_rsi.policy import GreedyBestFirstPolicy, GridPlan, GridPlanningContext
 from dream_rsi.replay import ReplaySimulator
 from dream_rsi.sandbox import (
     SandboxedPolicy,
@@ -61,6 +61,22 @@ from dream_rsi.policy import GreedyBestFirstPolicy
 
 class OptimalPolicy(GreedyBestFirstPolicy):
     pass
+"""
+
+
+# A candidate that plans its own grid (issue #21): §B.2's optional ``plan_grid``,
+# written the way the development agent is told to write it.
+PLANNING_SOURCE = """
+from dream_rsi.policy import GreedyBestFirstPolicy, GridPlan
+
+
+class OptimalPolicy(GreedyBestFirstPolicy):
+    def plan_grid(self, context):
+        return GridPlan(
+            branch_count=min(2, context.hard_max_branch_count),
+            refine_count=min(1, context.hard_max_refine_count),
+            reason="no history yet: a conservative bootstrap grid",
+        )
 """
 
 
@@ -374,6 +390,92 @@ def test_a_failed_candidate_does_not_stop_the_sweep() -> None:
     assert report.versions[1].score is not None
     assert report.versions[1].failures == ()
     assert report.ranking == ("baseline", "hangs")
+
+
+def test_a_candidates_grid_plan_crosses_the_boundary_and_absence_of_one_shows(
+    tmp_path: Path,
+) -> None:
+    """A written ``plan_grid`` reaches the runner; a policy without one has none.
+
+    The hook is optional (issue #21), and the runner decides whether a rollout
+    has a grid by looking for it. A proxy that answered for every candidate —
+    with ``None``, or with a grid of its own — would put every sandboxed policy
+    on a grid nobody wrote, so what the candidate defines has to be what the
+    caller finds.
+    """
+    context = GridPlanningContext(
+        hard_max_branch_count=8, hard_max_refine_count=4, max_workers=3
+    )
+
+    with SandboxedPolicy(PLANNING_SOURCE, limits=TEST_LIMITS, scratch_root=tmp_path) as planner:
+        plan = planner.plan_grid(context)
+    with SandboxedPolicy(BASELINE_SOURCE, limits=TEST_LIMITS, scratch_root=tmp_path) as plain:
+        unplanned = getattr(plain, "plan_grid", None)
+
+    assert plan == GridPlan(
+        branch_count=2, refine_count=1, reason="no history yet: a conservative bootstrap grid"
+    )
+    assert unplanned is None
+
+
+@pytest.mark.parametrize(
+    ("what", "returned"),
+    [
+        ("nothing at all", "return None"),
+        ("something that is not a plan", "return {'branch_count': 2, 'refine_count': 1}"),
+        (
+            "counts the protocol cannot carry",
+            "return GridPlan(branch_count=object(), refine_count=1, reason='')",
+        ),
+    ],
+)
+def test_a_candidate_that_answers_with_something_other_than_a_plan_fails(
+    tmp_path: Path, what: str, returned: str
+) -> None:
+    """The shape is checked where the object still exists — in the child.
+
+    Whatever a candidate hands back is a value in *its* process, and the only
+    thing that crosses the pipe is JSON. An unchecked answer would be a
+    ``TypeError`` raised while serialising the response, which is a harness
+    crash rather than the failed candidate it actually is.
+    """
+    source = (
+        "from dream_rsi.policy import GreedyBestFirstPolicy, GridPlan\n"
+        "\n"
+        "\n"
+        "class OptimalPolicy(GreedyBestFirstPolicy):\n"
+        "    def plan_grid(self, context):\n"
+        f"        {returned}\n"
+    )
+
+    with (
+        SandboxedPolicy(source, limits=TEST_LIMITS, scratch_root=tmp_path) as policy,
+        pytest.raises(SandboxError, match="GridPlan"),
+    ):
+        policy.plan_grid(
+            GridPlanningContext(hard_max_branch_count=8, hard_max_refine_count=4, max_workers=3)
+        )
+
+
+def test_a_planning_candidate_and_a_plain_one_score_in_the_same_sweep() -> None:
+    """Issue #21's done-when: both kinds of policy run in the same sweep.
+
+    A dreaming round replays a frozen world and creates no grid, so the hook is
+    not called there — but a version that defines it still has to load, decide
+    and score beside one that does not, or half the population of every round
+    after the agent starts writing grids would be lost to the harness.
+    """
+    worlds = [_world(name) for name in NAMES]
+    candidates = [
+        sandboxed_candidate("planner", PLANNING_SOURCE, limits=TEST_LIMITS),
+        sandboxed_candidate("plain", BASELINE_SOURCE, limits=TEST_LIMITS),
+    ]
+
+    report = dream(candidates, worlds, config=DreamConfig(width=2))
+
+    for version in report.versions:
+        assert version.failures == (), version.to_dict()
+        assert version.score is not None
 
 
 @pytest.mark.parametrize(

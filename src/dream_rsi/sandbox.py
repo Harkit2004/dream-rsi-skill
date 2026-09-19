@@ -6,11 +6,12 @@ reviewed, and CLAUDE.md's first warning is this one: that path stays sandboxed
 and resource-capped, and the caps are never relaxed to make a test pass.
 
 The boundary is a process. :class:`SandboxedPolicy` looks like a policy to
-``ReplaySimulator.replay`` — it answers ``reset`` and ``select`` — and holds a
-child process where the candidate's source was compiled and where every one of
-its decisions is actually taken. A hang, a memory bomb, a fork, a socket or a
-write outside the scratch directory is therefore something that happens *there*,
-and what the harness sees is one raised exception: issue #12's sweep already
+``ReplaySimulator.replay`` — it answers ``reset`` and ``select``, and
+``plan_grid`` where the candidate wrote one — and holds a child process where the
+candidate's source was compiled and where every one of its decisions is actually
+taken. A hang, a memory bomb, a fork, a socket or a write outside the scratch
+directory is therefore something that happens *there*, and what the harness sees
+is one raised exception: issue #12's sweep already
 records a candidate that raises as one failed cell and carries on, so the
 contract this module has to meet is simply to raise :class:`SandboxError`
 instead of hanging, crashing the parent or letting the attempt through.
@@ -35,8 +36,9 @@ the same strategy does in-process, or the dreaming score becomes a measurement o
 the execution path; ``tests/test_sandbox.py`` pins the whole serialised
 trajectory of a sandboxed baseline against the in-process one. Nothing
 non-deterministic crosses the boundary in either direction: the request carries
-the revealed tree, the eligible set, ``W`` and the generator's state, and the
-response carries a batch of node ids.
+the revealed tree, the eligible set, ``W`` and the generator's state — or, for a
+grid plan, the runner's caps — and the response carries a batch of node ids, or
+the plan's two counts and its reason.
 
 **The parent parses, it does not unpickle.** Requests and responses are
 line-delimited JSON, so a candidate that writes whatever it likes down the pipe
@@ -68,6 +70,7 @@ from typing import Any
 
 from dream_rsi._sandbox_child import DEFAULT_POLICY_NAME
 from dream_rsi.dream import PolicyCandidate
+from dream_rsi.policy import GridPlan, GridPlanningContext
 from dream_rsi.tree import DiscoveryTree
 
 __all__ = [
@@ -230,7 +233,7 @@ class SandboxedPolicy:
             self._process, fds = self._start()
             self._request_write, self._response_read = fds
             self._finalizer = weakref.finalize(self, _reap, self._process, fds, self._home)
-            self._request(
+            loaded = self._request(
                 {
                     "op": "init",
                     "source": source,
@@ -244,6 +247,9 @@ class SandboxedPolicy:
                     },
                 }
             )
+            # Whether the candidate wrote §B.2's grid plan, which is what
+            # :meth:`__getattr__` answers ``plan_grid`` from.
+            self._plans = loaded.get("plans") is True
         except BaseException:
             # ``__exit__`` never runs for a constructor that raised, and by here
             # there is a directory, and usually a child process, to let go of.
@@ -286,6 +292,51 @@ class SandboxedPolicy:
         if not isinstance(batch, list) or not all(isinstance(item, str) for item in batch):
             raise self._die(f"the policy answered with {_short(batch)} instead of a batch")
         return tuple(batch)
+
+    def __getattr__(self, name: str) -> Any:
+        """Offer ``plan_grid`` only where the candidate wrote one (issue #21).
+
+        §B.2's grid plan is optional here, and ``orchestrator.run_rollout``
+        decides whether a rollout has a grid by looking for the hook — so a proxy
+        that answered for every candidate would put the ones that wrote no
+        ``plan_grid`` on a grid nobody chose. Resolved on lookup rather than
+        bound onto the instance in :meth:`__init__`, because an instance holding
+        its own bound method is a reference cycle, and this class is reaped by
+        refcount when the harness drops it: the child would then outlive its cell
+        and wait for the cycle collector.
+        """
+        if name == "plan_grid" and self.__dict__.get("_plans"):
+            return self._plan_grid
+        raise AttributeError(name)
+
+    def _plan_grid(self, context: GridPlanningContext) -> GridPlan:
+        """The grid the candidate plans, taken in the child (§B.2, issue #21).
+
+        Reachable only on a candidate that defines ``plan_grid``: see
+        :meth:`__getattr__`. The context crosses as its three numbers and the
+        plan comes back as its three fields, so the runner validates a plan built
+        here rather than an object the candidate handed over.
+        """
+        response = self._request(
+            {
+                "op": "plan_grid",
+                "context": {
+                    "hard_max_branch_count": int(context.hard_max_branch_count),
+                    "hard_max_refine_count": int(context.hard_max_refine_count),
+                    "max_workers": int(context.max_workers),
+                },
+            }
+        )
+        plan = response.get("plan")
+        if not _is_plan(plan):
+            # Checked here as well as in the child, because the descriptor the
+            # protocol answers on is open in the process the candidate runs in
+            # and a candidate can write down it directly. What comes back is
+            # either a plan of two counts and a reason or it is this failure; the
+            # runner's own validation is about a plan that is too wide or too
+            # deep, and it should never be handed counts that are not numbers.
+            raise self._die(f"the policy answered with {_short(plan)} instead of a GridPlan")
+        return GridPlan(**plan)
 
     def close(self) -> None:
         """Kill the child and remove its scratch directory. Idempotent.
@@ -508,6 +559,16 @@ def sandboxed_candidate(
             policy_name=policy_name,
         ),
     )
+
+
+def _is_plan(plan: Any) -> bool:
+    """Whether a response's ``plan`` is a grid plan this parent can rebuild."""
+    if not isinstance(plan, dict) or set(plan) != {"branch_count", "refine_count", "reason"}:
+        return False
+    counts = (plan["branch_count"], plan["refine_count"])
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in counts):
+        return False
+    return isinstance(plan["reason"], str)
 
 
 def _kill(process: subprocess.Popen[bytes]) -> None:

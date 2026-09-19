@@ -53,6 +53,7 @@ import resource
 import sys
 from typing import Any
 
+from dream_rsi.policy import GridPlan, GridPlanningContext
 from dream_rsi.tree import DiscoveryTree
 
 # §B.2: "Keep ``NAME = "OptimalPolicy"`` and implement ``class
@@ -233,7 +234,10 @@ class _Session:
                 dict(request.get("config") or {}),
                 request.get("policy_name") or DEFAULT_POLICY_NAME,
             )
-            return {"ok": True}
+            # Whether this candidate wrote §B.2's optional grid plan (issue #21).
+            # Reported once, here, because it is a fact about the source and the
+            # parent has to be able to offer the hook only where there is one.
+            return {"ok": True, "plans": callable(getattr(self._policy, "plan_grid", None))}
         if self._policy is None:
             raise SandboxViolation(f"the sandbox was asked to {operation!r} before it was loaded")
         if operation == "reset":
@@ -248,6 +252,9 @@ class _Session:
                 int(request["width"]),
             )
             return {"ok": True, "batch": [_node_id(node_id) for node_id in batch]}
+        if operation == "plan_grid":
+            plan = self._policy.plan_grid(GridPlanningContext(**request["context"]))
+            return {"ok": True, "plan": _plan(plan)}
         raise SandboxViolation(f"unknown sandbox operation {operation!r}")
 
 
@@ -275,6 +282,32 @@ def _node_id(node_id: Any) -> str:
             f"a batch holds node ids, and this policy selected {node_id!r}"
         )
     return node_id
+
+
+def _plan(plan: Any) -> dict[str, Any]:
+    """A grid plan, as the protocol can carry it (issue #21).
+
+    Checked here, where the object the candidate built still exists: the pipe
+    carries JSON, so an answer that is not a plan of three serialisable fields
+    would otherwise fail while the response was being written — outside the
+    handler's own error path, which would take the child down instead of
+    recording a candidate that answered wrongly.
+    """
+    if not isinstance(plan, GridPlan):
+        raise SandboxViolation(
+            f"plan_grid must return a GridPlan from dream_rsi.policy, got {plan!r}"
+        )
+    for name in ("branch_count", "refine_count"):
+        value = getattr(plan, name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SandboxViolation(f"a GridPlan's {name} must be a whole number, got {value!r}")
+    if not isinstance(plan.reason, str):
+        raise SandboxViolation(f"a GridPlan's reason must be text, got {plan.reason!r}")
+    return {
+        "branch_count": plan.branch_count,
+        "refine_count": plan.refine_count,
+        "reason": plan.reason,
+    }
 
 
 def main() -> int:

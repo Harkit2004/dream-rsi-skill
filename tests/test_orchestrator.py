@@ -22,6 +22,8 @@ from dream_rsi.orchestrator import (
     main,
     run_rollout,
 )
+from dream_rsi.policy import GridPlan
+from dream_rsi.sandbox import SandboxedPolicy
 from dream_rsi.tree import DiscoveryTree
 from dream_rsi.workspace import SnapshotStore
 
@@ -62,6 +64,41 @@ class ReselectPolicy:
             self.selected.append(eligible[-1])
             return (self.selected[-1],)
         return (self.selected[1],)
+
+
+@dataclass
+class GridPolicy:
+    """Plans a grid, then asks for everything: ``width`` branches and every leaf.
+
+    A policy the grid has to say no to, so that what a rollout under one records
+    is the plan's doing rather than the policy's restraint. ``plan`` is whatever
+    its :meth:`plan_grid` answers, including the things that are not a plan at
+    all.
+    """
+
+    plan: object
+    widths: list[int] = field(default_factory=list)
+    contexts: list[object] = field(default_factory=list)
+
+    def plan_grid(self, context: object) -> object:
+        self.contexts.append(context)
+        return self.plan
+
+    def select(self, tree: DiscoveryTree, eligible: tuple[str, ...], width: int) -> tuple[str, ...]:
+        self.widths.append(width)
+        roots = (tree.root_id,) * width if tree.root_id in eligible else ()
+        return roots + tuple(node_id for node_id in eligible if node_id != tree.root_id)
+
+
+@dataclass(frozen=True)
+class CountingAgent:
+    """Counts the attempts it was asked for, and answers them."""
+
+    calls: list[int] = field(default_factory=list)
+
+    def propose(self, context: AgentContext) -> Artifact:
+        self.calls.append(context.seed or 0)
+        return Artifact(content="def solve(values):\n    return sum(values)\n")
 
 
 @dataclass(frozen=True)
@@ -141,6 +178,16 @@ def rollout(
 def attempts(result):
     """Every node the rollout recorded, root excluded."""
     return [node for node in result.tree.iter_nodes() if node.parent_id is not None]
+
+
+def depth(tree, node_id):
+    """How far ``node_id`` sits below the root."""
+    steps = 0
+    parent = tree.node(node_id).parent_id
+    while parent is not None:
+        steps += 1
+        parent = tree.node(parent).parent_id
+    return steps
 
 
 def test_each_attempt_is_recorded_as_a_child_of_the_node_the_policy_selected(tmp_path):
@@ -226,6 +273,114 @@ def test_a_round_cut_short_by_the_budget_still_records_the_width_asked_for(tmp_p
     result = rollout(policy, tmp_path, workers=3, max_rounds=4, max_nodes=5)
 
     assert [(round_.k, len(round_.produced)) for round_ in result.rounds] == [(3, 3), (3, 2)]
+
+
+def test_a_policy_that_plans_no_grid_opens_every_branch_it_asks_for(tmp_path):
+    """The hook is optional (issue #21): without one, nothing narrows the rollout.
+
+    Six root selections over two rounds are six branches, and the width offered
+    is ``W`` — which is what a grid a policy never asked for would have cut down.
+    """
+    policy = ScriptedPolicy(script=((0, 0, 0), (0, 0, 0)))
+
+    result = rollout(policy, tmp_path, workers=3, max_rounds=2)
+
+    assert len(result.tree.children(result.tree.root_id)) == 6
+    assert policy.widths == [3, 3]
+
+
+def test_the_planned_grid_bounds_the_branches_the_refinements_and_the_width(tmp_path):
+    """§B.2: "the runtime grid is the hard bound" on branches and on attempts.
+
+    ``GridPlan(branch_count=2, refine_count=1)`` creates branches 0..1 and
+    attempts 0..1, so this rollout is two branches wide and two attempts deep
+    however much the policy asks for and however many workers it is given.
+    """
+    policy = GridPolicy(plan=GridPlan(branch_count=2, refine_count=1, reason="two by one"))
+
+    result = rollout(
+        policy, tmp_path, workers=4, max_rounds=6, max_branches=8, max_refinements=4
+    )
+
+    tree = result.tree
+    assert len(tree.children(tree.root_id)) == 2
+    assert [depth(tree, node.id) for node in attempts(result)] == [1, 1, 2, 2]
+    assert result.stop_reason == "empty_batch"
+    # The grid is W wide, so no round is offered more parallelism than it can use.
+    assert policy.widths == [2, 2, 2]
+    # Asked once, before the grid exists, and given the runner's caps to plan
+    # within — never a current episode's outcomes (§B.2).
+    assert len(policy.contexts) == 1
+    assert policy.contexts[0].hard_max_branch_count == 8
+    assert policy.contexts[0].hard_max_refine_count == 4
+    assert policy.contexts[0].max_workers == 4
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        None,
+        "two by one",
+        GridPlan(branch_count=0, refine_count=1, reason="a grid with no branches"),
+        GridPlan(branch_count=3, refine_count=1, reason="wider than the runner allows"),
+        GridPlan(branch_count=2, refine_count=-1, reason="fewer than no refinements"),
+        GridPlan(branch_count=2, refine_count=2, reason="deeper than the runner allows"),
+        GridPlan(branch_count=True, refine_count=1, reason="a flag is not a count"),
+    ],
+)
+def test_a_grid_plan_the_runner_cannot_honour_is_rejected_before_any_attempt(tmp_path, plan):
+    """§B.2 has the runner validate the plan, so a bad one costs no agent call.
+
+    A plan outside the caps — or something that is not a plan at all — has to
+    stop the rollout rather than be rounded into a grid nobody chose, which
+    would spend a real budget exploring under it.
+    """
+    agent = CountingAgent()
+
+    with pytest.raises(ValueError, match="grid plan|GridPlan"):
+        rollout(
+            GridPolicy(plan=plan),
+            tmp_path,
+            agent=agent,
+            workers=2,
+            max_rounds=2,
+            max_branches=2,
+            max_refinements=1,
+        )
+
+    assert agent.calls == []
+
+
+def test_a_grid_a_sandboxed_policy_planned_is_the_grid_the_rollout_runs(tmp_path):
+    """The path a deployed policy actually takes (``run.py``), end to end.
+
+    A cycle's policy is model-written code, so it is deployed behind the sandbox
+    and the rollout asks *that* for its grid. The two halves are tested apart —
+    the proxy carries a plan across the boundary, and a rollout honours one — and
+    this is the only place they meet: a runner that looked for the hook in a way
+    the proxy does not answer would deploy every written grid ungridded, and
+    nothing else would notice.
+    """
+    source = (
+        "from dream_rsi.policy import BreadthFirstPolicy, GridPlan\n"
+        "\n"
+        "\n"
+        "class OptimalPolicy(BreadthFirstPolicy):\n"
+        "    def plan_grid(self, context):\n"
+        "        return GridPlan(\n"
+        "            branch_count=min(2, context.hard_max_branch_count),\n"
+        "            refine_count=min(1, context.hard_max_refine_count),\n"
+        "            reason='no history yet: a conservative bootstrap grid',\n"
+        "        )\n"
+    )
+
+    with SandboxedPolicy(source, scratch_root=tmp_path) as policy:
+        result = rollout(policy, tmp_path, workers=4, max_rounds=6)
+
+    tree = result.tree
+    assert len(tree.children(tree.root_id)) == 2
+    assert [depth(tree, node.id) for node in attempts(result)] == [1, 1, 2, 2]
+    assert result.stop_reason == "empty_batch"
 
 
 @pytest.mark.parametrize("failing", ["agent", "evaluator"])
