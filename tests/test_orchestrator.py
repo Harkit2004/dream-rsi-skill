@@ -433,6 +433,26 @@ def test_selecting_a_node_that_is_not_eligible_is_rejected(tmp_path):
     assert len(policy.selected) == 2
 
 
+def test_only_the_root_may_be_selected_twice_in_one_round(tmp_path):
+    """A batch names each leaf at most once; the root is the one node that repeats.
+
+    §3's action is a set ``C ⊆ A(T)`` and §B.2 states the same rule for the
+    policy: a batch "may contain several roots and/or one frontier from each
+    opened branch" and must "have no duplicate ids". A rollout that took two
+    attempts from one leaf would record two children there, and §3's replay
+    hands a non-root node "its unique recorded child" — so the second one could
+    never be revealed and the recording would not be replayable (issue #31).
+    """
+    # Round 0 opens a branch; round 1 asks for two attempts from its one leaf.
+    with pytest.raises(ValueError, match=r"only the root"):
+        rollout(ScriptedPolicy(script=((0,), (1, 1))), tmp_path, workers=2, max_rounds=2)
+
+    # The root still repeats, which is how one round reaches full width.
+    result = rollout(ScriptedPolicy(script=((0, 0),)), tmp_path, workers=2, max_rounds=1)
+
+    assert len(result.tree.children(result.tree.root_id)) == 2
+
+
 def test_eligible_nodes_are_the_root_and_the_leaves(tmp_path):
     result = rollout(ScriptedPolicy(script=((0,), (0, 1))), tmp_path, workers=2, max_rounds=2)
 

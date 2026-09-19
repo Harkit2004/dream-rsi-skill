@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from collections import Counter
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -223,8 +224,9 @@ class ExplorationPolicy(Protocol):
         """Choose the batch to expand next, or nothing to end the rollout.
 
         ``eligible`` is ``A(T)``, the root followed by the current leaves.
-        ``width`` is ``W``. Every returned id must be in ``eligible``; returning
-        one twice schedules two attempts from that node in the same round.
+        ``width`` is ``W``. Every returned id must be in ``eligible``; the root
+        may be returned several times, scheduling one new branch each, and every
+        other node at most once (see ``_check_batch``).
         """
         ...
 
@@ -302,7 +304,7 @@ def run_rollout(
 
             eligible = _eligible(tree, plan)
             batch = tuple(policy.select(tree, eligible, width))
-            _check_batch(batch, eligible)
+            _check_batch(batch, eligible, tree.root_id)
             if not batch:
                 stop_reason = STOP_EMPTY_BATCH
                 break
@@ -469,7 +471,7 @@ def _depth(tree: DiscoveryTree, node_id: str) -> int:
     return depth
 
 
-def _check_batch(batch: Sequence[str], eligible: Sequence[str]) -> None:
+def _check_batch(batch: Sequence[str], eligible: Sequence[str], root_id: str) -> None:
     """Reject a batch that is not an action the decision interface allows.
 
     PAPER-GAP: §3 defines the action as a set ``C ⊆ A(T)`` with ``|C| ≤ W``,
@@ -477,10 +479,20 @@ def _check_batch(batch: Sequence[str], eligible: Sequence[str]) -> None:
     the experiments run 10 and 32 parallel workspaces off a single root (§4),
     and the replay cost model in §B.2 prices a batch of size ``k`` at
     ``ceil(k / W)`` sequential rounds, which only says anything when ``k > W``.
-    We therefore take the batch as a sequence: repeats are allowed, and each one
-    opens its own branch, so a rollout can reach full width in one round. ``W``
+    We therefore take the batch as a sequence, and allow the repeats §B.2 allows
+    the policy: a batch "may contain several roots and/or one frontier from each
+    opened branch", and must otherwise "have no duplicate ids". So the root may
+    be named as often as the round has workers for — that is how a rollout
+    reaches full width in one round — and every other node at most once. ``W``
     stays the number of workers, and a batch wider than ``W`` simply queues.
     Revisit if the authors' implementation lands (see references/method.md).
+
+    Refusing the repeats of a leaf is what keeps a recorded tree replayable
+    (issue #31): every non-root node ends with at most one recorded child, which
+    is the one case §3's replay has a rule for — "for ``v ≠ r``,
+    ``Child(v; T_i, T_i^{m,k})`` is ``v``'s unique recorded child". A second
+    child there could never be revealed, because revealing the first stops its
+    parent being a leaf and so takes it out of ``A(T)`` for good.
     """
     allowed = set(eligible)
     unknown = [node_id for node_id in batch if node_id not in allowed]
@@ -488,6 +500,17 @@ def _check_batch(batch: Sequence[str], eligible: Sequence[str]) -> None:
         raise ValueError(
             f"policy selected node(s) outside A(T): {', '.join(sorted(set(unknown)))}; "
             f"eligible are {', '.join(eligible)}"
+        )
+    counts = Counter(node_id for node_id in batch if node_id != root_id)
+    repeated = sorted(node_id for node_id, count in counts.items() if count > 1)
+    if repeated:
+        # Refused here and nowhere else: replay has nothing to refuse, because
+        # the second selection of a leaf retrieves the empty set §3 already
+        # defines for it. Only the online transition, which creates a child per
+        # selection, can record something reveal cannot reach.
+        raise ValueError(
+            f"policy selected node(s) twice in one batch: {', '.join(repeated)}; "
+            f"only the root may repeat, and each of its repeats opens a branch"
         )
 
 
