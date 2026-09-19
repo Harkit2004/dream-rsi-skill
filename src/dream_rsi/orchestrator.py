@@ -24,8 +24,8 @@ so the number of workers changes how long a rollout takes and nothing about the
 tree it records.
 
 The tree this produces is what a replay world is built from (issue #7), so each
-round is also logged: the batch width the policy asked for — Equation 1's ``k``
-(issue #8) — the nodes it selected, and the children those selections produced.
+round is also logged: the batch width the policy asked for, the nodes it
+selected, and the children those selections produced.
 """
 
 from __future__ import annotations
@@ -139,9 +139,14 @@ class RolloutConfig:
 class RoundRecord:
     """One completed decision round.
 
-    ``k`` is the batch width the policy asked for, which is what Equation 1's
-    batching term is computed against (issue #8); it is larger than
-    ``len(selected)`` on the round where the node budget ran out mid-batch.
+    ``k`` is the batch width the policy asked for, kept because the tree records
+    only the attempts that ran and so cannot say what was requested; it is larger
+    than ``len(selected)`` on the round where the node budget ran out mid-batch.
+    It is *not* Equation 1's parallelism denominator: that is ``k_i^{m,★}``, "the
+    number of completed rounds at termination" (§3, *Replay objective*), which
+    rewards attempts per round rather than the width of any one batch. A replay
+    counts it as ``len(run.rounds)`` — see
+    :attr:`~dream_rsi.replay.ReplayRun.round_count`.
     ``selected`` and ``produced`` align pairwise: ``produced[i]`` is the child
     the attempt from ``selected[i]`` created.
     """
