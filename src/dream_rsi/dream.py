@@ -33,6 +33,14 @@ aggregate at all — see :class:`VersionReport`. Bounding what such code may *do
 :mod:`dream_rsi.sandbox`, which raises where a candidate oversteps; this module
 only contains the exception.
 
+**Selection reads a grid, it does not build one.** :func:`select` is step 5 —
+"the next online policy is selected from all ``M`` evaluated versions" — and it
+takes one :class:`DreamReport`, because that is what makes the incumbent's floor
+mean anything: every version in a report was replayed over the same history
+under the same ``DreamConfig``, ``π_t^0`` among them. It re-derives nothing and
+accepts no score from anywhere else, so the ``V^0`` it holds a candidate to is
+this round's, not the one the incumbent earned when the history was shorter.
+
 Dreaming is replay, so this module reaches the simulator, the objective and the
 tree, and no adapter: nothing on the replay path may call a discovery agent or
 an evaluator, and ``tests/test_dream.py`` asserts the import stays out.
@@ -56,9 +64,11 @@ __all__ = [
     "DreamReport",
     "PolicyCandidate",
     "ReplayWorld",
+    "Selection",
     "VersionReport",
     "WorldReplay",
     "dream",
+    "select",
 ]
 
 # PAPER-GAP: §3 requires only "M ≥ 1" policy versions and never says what M is;
@@ -314,6 +324,59 @@ class DreamReport:
         return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True)
+class Selection:
+    """Which version is deployed next, and the line that says why (§3, issue #15).
+
+    ``winner`` is ``m⋆`` and ``incumbent`` is ``π_t^0``; :attr:`retained` is the
+    two being the same version, which §3 makes a normal outcome rather than a
+    failed round — "because the candidate set includes the current policy, this
+    selection satisfies ``V^{m⋆} ≥ V^0``". A round that improves nothing keeps
+    what it has, and the history it collected is still what the next round
+    dreams over.
+
+    ``score`` and ``incumbent_score`` are those two versions' ``V^m`` on the
+    round that was selected from, so the floor can be read back afterwards
+    rather than taken on trust; :attr:`margin` is the improvement they bound.
+    The names are how the winner is mapped back to code — a
+    ``develop.DevelopedVersion`` carries the source under the same name.
+    """
+
+    winner: str
+    incumbent: str
+    score: float | None
+    incumbent_score: float | None
+    rationale: str
+
+    @property
+    def retained(self) -> bool:
+        """Whether ``π_{t+1} = π_t``: no version beat the incumbent (§3)."""
+        return self.winner == self.incumbent
+
+    @property
+    def margin(self) -> float | None:
+        """``V^{m⋆} − V^0``: zero on a retention, ``None`` where either has no score."""
+        if self.winner == self.incumbent:
+            # Not a subtraction: where the incumbent won on ``-inf`` both sides
+            # are the same infinity and the difference of those is not a number.
+            return None if self.score is None else 0.0
+        if self.score is None or self.incumbent_score is None:
+            return None
+        return self.score - self.incumbent_score
+
+    def to_dict(self) -> dict[str, Any]:
+        """The selection as the run report (issue #18) carries it."""
+        return {
+            "winner": self.winner,
+            "incumbent": self.incumbent,
+            "retained": self.retained,
+            "score": _json_score(self.score),
+            "incumbent_score": _json_score(self.incumbent_score),
+            "margin": _json_score(self.margin),
+            "rationale": self.rationale,
+        }
+
+
 def dream(
     candidates: Sequence[PolicyCandidate],
     worlds: Sequence[ReplayWorld],
@@ -360,6 +423,131 @@ def dream(
         worlds=tuple(world.name for world in worlds),
         config=config,
     )
+
+
+def select(report: DreamReport, *, incumbent: str | None = None) -> Selection:
+    """Name ``π_{t+1}`` from one dreaming round, no worse than ``π_t`` (§3).
+
+    §3's step 5: "the next online policy is selected from all ``M`` evaluated
+    versions as ``π_{t+1} = π_t^{m⋆}``, where ``m⋆ ∈ argmax_m V^m``. Because the
+    candidate set includes the current policy, this selection satisfies
+    ``V^{m⋆} ≥ V^0``." The floor is therefore not a rule applied on top of the
+    argmax — it *is* the argmax, as long as the incumbent is one of the versions
+    being compared and every version was scored on the same history under the
+    same conditions. Both are checked here rather than assumed: a grid is one
+    pool and one :class:`DreamConfig` by construction (:func:`dream`), but
+    ``develop.DevelopmentReport.comparison`` assembles one out of per-version
+    reports, so a row scored over an earlier, smaller pool is an assembly away
+    — and comparing today's candidates against yesterday's ``V^0`` would leave
+    the guarantee holding over a history nobody replays any more.
+
+    ``incumbent`` names ``π_t^0``; it defaults to the first version of the
+    report, which is the order §3 develops them in and the order
+    :func:`~dream_rsi.develop.develop` produces them in.
+    """
+    by_name = {version.name: version for version in report.versions}
+    name = report.versions[0].name if incumbent is None else incumbent
+    if name not in by_name:
+        raise ValueError(
+            f"incumbent {name!r} is not one of the versions this round scored "
+            f"({', '.join(by_name)}); §3's floor needs π_t^0 among them"
+        )
+    for version in report.versions:
+        scored = tuple(replay.world for replay in version.replays)
+        if scored != report.worlds:
+            raise ValueError(
+                f"version {version.name!r} was scored on {list(scored)}, not on this round's "
+                f"pool {list(report.worlds)}; a V^m from another history is not comparable"
+            )
+
+    floor = by_name[name]
+    best = _best(report.versions)
+    # PAPER-GAP: §3's argmax has no tie-break and assumes every version has a
+    # V^m. Two choices follow. A version that only *matches* V^0 does not
+    # displace the incumbent — the floor is read strictly, since swapping in an
+    # equally-scoring policy spends an online rollout to learn nothing — and
+    # among versions that tie above it the earliest developed wins, which is the
+    # one its rivals were revised from and the one this report already ranks
+    # first. Where the incumbent itself scored no aggregate there is no V^0 to
+    # be no worse than, so the best scoring version wins and the round is an
+    # improvement by default; retaining a policy that raised on the history
+    # would keep every later round stuck on it. Revisit if the authors'
+    # implementation lands (see references/method.md).
+    if best is None or (floor.score is not None and best.score <= floor.score):
+        winner = floor
+    else:
+        winner = best
+    return Selection(
+        winner=winner.name,
+        incumbent=floor.name,
+        score=winner.score,
+        incumbent_score=floor.score,
+        rationale=_rationale(report, winner, floor),
+    )
+
+
+def _best(versions: Sequence[VersionReport]) -> VersionReport | None:
+    """The highest-scoring version, earliest first on a tie, or ``None`` if none scored.
+
+    A version with no aggregate is not a low score, it is no score: it cannot
+    win, however badly the ones that ran did (:class:`VersionReport`).
+    """
+    scored = [version for version in versions if version.score is not None]
+    if not scored:
+        return None
+    # ``max`` keeps the first of equal keys, which is the tie-break this module
+    # documents: the earliest version developed, the one its rivals came from.
+    return max(scored, key=lambda version: version.score)
+
+
+def _rationale(report: DreamReport, winner: VersionReport, floor: VersionReport) -> str:
+    """One line saying why this version is being deployed, for the run log (issue #18)."""
+    grid = f"{len(report.versions)} version(s) over {len(report.worlds)} world(s)"
+    if winner.name != floor.name:
+        against = (
+            f"beats V^0={_number(floor.score)} by {_gap(winner.score, floor.score)}"
+            if floor.score is not None
+            else f"{floor.name} scored no aggregate, so there was no floor to hold"
+        )
+        return (
+            f"selected {winner.name} at V^m={_number(winner.score)} in place of the "
+            f"incumbent {floor.name}: {against}; {grid}"
+        )
+    if floor.score is None:
+        return (
+            f"retained the incumbent {floor.name}: no version of this round scored an "
+            f"aggregate, {floor.name} included; {grid}"
+        )
+    runners = [version for version in report.versions if version.name != floor.name]
+    runner_up = _best(runners)
+    if runner_up is None:
+        best = "no other version scored an aggregate"
+    else:
+        best = (
+            f"best other version {runner_up.name} scored {_number(runner_up.score)} "
+            f"({_gap(runner_up.score, floor.score)})"
+        )
+    return (
+        f"retained the incumbent {floor.name} at V^0={_number(floor.score)}: "
+        f"no version beat it, {best}; {grid}"
+    )
+
+
+def _number(score: float | None) -> str:
+    """A ``V^m`` as the log states it; ``none`` where the version scored none."""
+    return "none" if score is None else f"{score:.4f}"
+
+
+def _gap(score: float, floor: float) -> str:
+    """The distance between two ``V^m``, for the log.
+
+    ``no difference`` where both revealed nothing carrying an ``s_v``: two
+    versions on ``-inf`` are equally far from having attained anything, and the
+    subtraction of one from the other is a ``nan`` that means nothing to a
+    reader (see :class:`WorldReplay`).
+    """
+    difference = score - floor
+    return "no difference" if math.isnan(difference) else f"{difference:+.4f}"
 
 
 def _replay(candidate: PolicyCandidate, world: ReplayWorld, config: DreamConfig) -> WorldReplay:
