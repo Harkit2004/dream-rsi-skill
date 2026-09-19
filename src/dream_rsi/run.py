@@ -31,9 +31,14 @@ So the record existing means the cycle finished, a run resumes by reading the
 records it finds, and a cycle interrupted half-way is redone from the top rather
 than patched up. That is what makes a crash in cycle 5 cost cycle 5.
 
-**The pool is the cycle directories.** One tree per cycle, dreamed over by name.
-Keeping it across sessions, measuring it, and deciding what to do once it is too
-large to replay in full is issue #17; this grows it honestly and reads all of it.
+**The pool is a store beside the cycles.** A cycle records its tree in its own
+directory, as the evidence for the record it writes, and adds it to
+:class:`~dream_rsi.pool.SimulatorPool` under the cycle's name — so what a later
+session dreams over is the pool, not a walk over whatever cycle directories it
+finds, and a run resumed tomorrow inherits every tree the runs before it
+recorded (issue #17). The cycle records stay the authority on which cycles this
+run may trust: resuming re-adds the tree of a finished cycle the pool is missing
+rather than dreaming over a history shorter than its own records claim.
 """
 
 from __future__ import annotations
@@ -52,14 +57,14 @@ from dream_rsi.adapters.evaluator import TaskEvaluator
 from dream_rsi.adapters.fake_developer import FakeDeveloper
 from dream_rsi.adapters.toy_search import ToySearchAgent, ToySearchEvaluator, plan_source
 from dream_rsi.develop import DEFAULT_ATTEMPTS, PolicyDeveloper, develop
-from dream_rsi.dream import DEFAULT_VERSIONS, DreamConfig, ReplayWorld, Selection, select
+from dream_rsi.dream import DEFAULT_VERSIONS, DreamConfig, Selection, select
 from dream_rsi.orchestrator import (
     STORE_DIRNAME,
     TREE_FILENAME,
     RolloutConfig,
     run_rollout,
 )
-from dream_rsi.replay import ReplaySimulator
+from dream_rsi.pool import PoolConfig, PoolStats, SimulatorPool, subsample
 from dream_rsi.sandbox import DEFAULT_LIMITS, SandboxedPolicy, SandboxLimits
 from dream_rsi.tree import DiscoveryTree
 from dream_rsi.workspace import SnapshotStore
@@ -70,6 +75,7 @@ __all__ = [
     "DEFAULT_POLICY_SOURCE",
     "NEXT_POLICY_FILENAME",
     "POLICY_FILENAME",
+    "POOL_DIRNAME",
     "RECORD_FILENAME",
     "CycleRecord",
     "Run",
@@ -81,6 +87,9 @@ __all__ = [
 
 CYCLES_DIRNAME = "cycles"
 CYCLE_TEMPLATE = "cycle_{:03d}"
+
+# Where the run keeps ℋ: one tree per finished cycle, under the cycle's name.
+POOL_DIRNAME = "pool"
 
 # What one cycle leaves behind, beside the tree and round log
 # ``orchestrator.Rollout.save`` writes. ``RECORD_FILENAME`` is written last and
@@ -128,7 +137,8 @@ class RunConfig:
     ``rollout`` is the online half and ``dreaming`` the offline one; ``versions``
     is §3's ``M`` and ``attempts`` how many times a refused revision is asked for
     again. ``limits`` caps every process a policy's code runs in, online
-    deployment included.
+    deployment included. ``pool`` bounds how much of the history one offline
+    phase replays, and by default bounds it not at all.
     """
 
     cycles: int = 3
@@ -137,6 +147,7 @@ class RunConfig:
     versions: int = DEFAULT_VERSIONS
     attempts: int = DEFAULT_ATTEMPTS
     limits: SandboxLimits = DEFAULT_LIMITS
+    pool: PoolConfig = field(default_factory=PoolConfig)
 
     def __post_init__(self) -> None:
         if self.cycles < 1:
@@ -158,8 +169,12 @@ class CycleRecord:
     """One completed outer iteration, as its ``cycle.json`` carries it.
 
     ``world`` is the name this cycle's tree joined the pool under and ``pool`` is
-    ``ℋ_t``, the worlds the offline phase ran over — this cycle's own last, since
-    §3 appends before it dreams. ``versions`` are the ``M`` the round developed
+    the worlds the offline phase ran over — ``ℋ_t``, this cycle's own last, since
+    §3 appends before it dreams, or the subsequence of it that
+    :func:`~dream_rsi.pool.subsample` kept when the run set a
+    :class:`~dream_rsi.pool.PoolConfig` limit. It is what this cycle dreamed
+    over, which is why a limit is measured rather than assumed: the store still
+    holds every tree. ``versions`` are the ``M`` the round developed
     and ``rejected`` the count of outputs the harness refused along the way
     (``develop.Rejection``). ``selection`` names ``π_{t+1}``.
 
@@ -219,10 +234,18 @@ class CycleRecord:
 
 @dataclass(frozen=True)
 class Run:
-    """A finished run: what each cycle did, and the policy the next one would deploy."""
+    """A finished run: what each cycle did, and the policy the next one would deploy.
+
+    ``pool`` is what the simulator pool holds at the end and ``stats`` what it
+    costs to dream over (issue #17). They describe the store, not the round: a
+    cycle that subsampled dreamed over the worlds its own record names, while
+    the pool keeps every tree for the runs that come after.
+    """
 
     cycles: tuple[CycleRecord, ...]
     policy: str
+    pool: tuple[str, ...]
+    stats: PoolStats
 
 
 def run_cycles(
@@ -258,10 +281,12 @@ def run_cycles(
     config = RunConfig() if config is None else config
     cycles = Path(directory) / CYCLES_DIRNAME
     cycles.mkdir(parents=True, exist_ok=True)
+    pool = SimulatorPool(Path(directory) / POOL_DIRNAME)
 
-    records, pool, source = _resume(cycles, config.cycles, policy)
+    records, source = _resume(cycles, config.cycles, policy, pool)
+    history = [record.world for record in records]
     for index in range(len(records), config.cycles):
-        record, world, source = _cycle(
+        record, source = _cycle(
             index,
             agent=agent,
             evaluator=evaluator,
@@ -269,37 +294,45 @@ def run_cycles(
             source=source,
             problem=problem,
             cycle=cycles / CYCLE_TEMPLATE.format(index),
-            pool=tuple(pool),
+            pool=pool,
+            history=tuple(history),
             config=config,
             scratch_root=scratch_root,
         )
         records.append(record)
-        pool.append(world)
-    return Run(cycles=tuple(records), policy=source)
+        history.append(record.world)
+    return Run(cycles=tuple(records), policy=source, pool=pool.names(), stats=pool.stats())
 
 
 def _resume(
-    cycles: Path, wanted: int, policy: str
-) -> tuple[list[CycleRecord], list[ReplayWorld], str]:
+    cycles: Path, wanted: int, policy: str, pool: SimulatorPool
+) -> tuple[list[CycleRecord], str]:
     """The cycles already finished under ``cycles``, and what the next one deploys.
 
     Read in order and stopped at the first gap: a cycle with no record did not
     finish, and every cycle after it was run under a policy that cycle was
     supposed to pick, so whatever is on disk beyond the gap describes a history
     this run no longer has. They are redone rather than trusted.
+
+    A finished cycle's tree is put back into the pool if the pool has lost it,
+    from the copy the cycle itself recorded. The records say which worlds this
+    run has; dreaming over fewer of them because a pool directory was cleaned,
+    half-copied, or never written by an older run would shorten ``ℋ_t`` without
+    saying so.
     """
     records: list[CycleRecord] = []
-    pool: list[ReplayWorld] = []
     source = policy
+    held = set(pool.names())
     for index in range(wanted):
         directory = cycles / CYCLE_TEMPLATE.format(index)
         if not (directory / RECORD_FILENAME).is_file():
             break
         record = _read_record(directory / RECORD_FILENAME)
         records.append(record)
-        pool.append(_world(record.world, directory))
+        if record.world not in held:
+            pool.add(record.world, _tree(directory / TREE_FILENAME))
         source = _read(directory / NEXT_POLICY_FILENAME)
-    return records, pool, source
+    return records, source
 
 
 def _cycle(
@@ -311,10 +344,11 @@ def _cycle(
     source: str,
     problem: str,
     cycle: Path,
-    pool: tuple[ReplayWorld, ...],
+    pool: SimulatorPool,
+    history: tuple[str, ...],
     config: RunConfig,
     scratch_root: str | Path | None,
-) -> tuple[CycleRecord, ReplayWorld, str]:
+) -> tuple[CycleRecord, str]:
     """One outer iteration: §3's five steps, and the directory that records them."""
     # From the top, not from what is there: a directory without a record is a
     # cycle that was interrupted, and its tree, round log and next policy may
@@ -350,15 +384,18 @@ def _cycle(
         )
     rollout.save(cycle)
 
-    # 2. Append 𝒯_t to the history: ℋ_t = ℋ_{t-1} ∪ {𝒯_t} (§3).
-    world = ReplayWorld(name=CYCLE_TEMPLATE.format(index), simulator=ReplaySimulator(rollout.tree))
-    history = (*pool, world)
+    # 2. Append 𝒯_t to the history: ℋ_t = ℋ_{t-1} ∪ {𝒯_t} (§3). Into the pool
+    # before the record that vouches for this cycle is written, so a cycle a
+    # later run trusts is a cycle whose tree that run can dream over.
+    name = CYCLE_TEMPLATE.format(index)
+    pool.add(name, rollout.tree)
+    dreamed = subsample((*history, name), config.pool)
 
     # 3 and 4. Dream M versions over ℋ_t, each revised from the last one's replay
     # feedback, then 5: select π_{t+1}, which §3 guarantees is no worse than π_t.
     development = develop(
         source,
-        history,
+        pool.worlds(dreamed),
         developer,
         versions=config.versions,
         attempts=config.attempts,
@@ -372,24 +409,24 @@ def _cycle(
 
     record = CycleRecord(
         index=index,
-        world=world.name,
+        world=name,
         attempts=len(rollout.tree) - 1,
         stop_reason=rollout.stop_reason,
-        pool=tuple(entry.name for entry in history),
+        pool=dreamed,
         versions=tuple(version.name for version in development.versions),
         rejected=len(development.rejected),
         selection=selection,
     )
     _write_record(cycle / RECORD_FILENAME, record)
-    return record, world, chosen
+    return record, chosen
 
 
-def _world(name: str, directory: Path) -> ReplayWorld:
-    """The replay world a finished cycle's tree makes, read back off disk."""
-    return ReplayWorld(
-        name=name,
-        simulator=ReplaySimulator(DiscoveryTree.load(directory / TREE_FILENAME)),
-    )
+def _tree(path: Path) -> DiscoveryTree:
+    """A finished cycle's own copy of the tree it recorded."""
+    try:
+        return DiscoveryTree.load(path)
+    except (OSError, ValueError) as exc:
+        raise RunError(f"{path} is not a readable tree: {exc}") from exc
 
 
 def _read(path: Path) -> str:
@@ -447,6 +484,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help=f"policy versions M per cycle (default: {DEFAULT_VERSIONS})",
     )
     parser.add_argument("--seed", type=int, default=0, help="the run's seed (default: 0)")
+    parser.add_argument(
+        "--pool-limit",
+        type=int,
+        default=None,
+        help="dream over at most this many worlds a cycle (default: the whole pool)",
+    )
     args = parser.parse_args(argv)
 
     run = run_cycles(
@@ -468,6 +511,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             # for their V^m to be comparable at all.
             dreaming=DreamConfig(width=args.workers, seed=args.seed),
             versions=args.versions,
+            pool=PoolConfig(limit=args.pool_limit, seed=args.seed),
         ),
     )
     for record in run.cycles:
@@ -476,6 +520,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{record.stop_reason}, dreamed {len(record.versions)} version(s) over "
             f"{len(record.pool)} world(s) -> {record.selection.rationale}"
         )
+    print(
+        f"pool: {run.stats.trees} tree(s), {run.stats.nodes} node(s), "
+        f"{run.stats.bytes} byte(s) on disk"
+    )
     return 0
 
 
