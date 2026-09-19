@@ -38,7 +38,7 @@ from pathlib import Path
 
 from dream_rsi.dream import ReplayWorld
 from dream_rsi.replay import DEFAULT_SEED, ReplaySimulator
-from dream_rsi.tree import DiscoveryTree, TreeError
+from dream_rsi.tree import DiscoveryTree
 
 __all__ = [
     "TREE_SUFFIX",
@@ -105,10 +105,6 @@ class SimulatorPool:
 
     def __init__(self, directory: str | Path) -> None:
         self._directory = Path(directory)
-
-    @property
-    def directory(self) -> Path:
-        return self._directory
 
     def names(self) -> tuple[str, ...]:
         """Every tree in the pool, in name order.
@@ -184,7 +180,7 @@ class SimulatorPool:
     def _load(self, path: Path) -> DiscoveryTree:
         try:
             return DiscoveryTree.load(path)
-        except (OSError, TreeError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             raise PoolError(f"{path} is not a readable tree: {exc}") from exc
 
     def _path(self, name: str) -> Path:
