@@ -32,6 +32,13 @@ HEADING = "## Quickstart"
 # a duration is not reproducible and the README cannot promise one.
 WALL_CLOCK = ("online.s", "dream.s")
 
+# How long the documented command gets before the test gives up on it. Two
+# orders of magnitude above what the toy run takes, so nothing here is timing
+# the machine — it is there because neither CI nor this suite sets a timeout of
+# its own, and a quickstart that had come to block would otherwise hold the job
+# open to the runner's limit rather than failing.
+TIMEOUT_SECONDS = 120
+
 
 def _section(heading: str) -> str:
     """The README under ``heading``, up to the next heading of the same level."""
@@ -101,6 +108,7 @@ def _quickstart(tmp_path: Path) -> subprocess.CompletedProcess[str]:
         text=True,
         cwd=tmp_path,
         check=False,
+        timeout=TIMEOUT_SECONDS,
     )
 
 
