@@ -18,6 +18,7 @@ The paper is vendored at [`references/paper/`](references/paper/): the PDF is au
 - `src/dream_rsi/scoring.py` — Equation 1. Keep it a pure function.
 - `src/dream_rsi/policy.py` — the `OptimalPolicy` interface candidate policies implement.
 - `src/dream_rsi/dream.py` — offline dreaming and version selection.
+- `src/dream_rsi/develop.py` — the policy-development agent's pipeline; its prompt is `src/dream_rsi/prompts/policy_development.md`.
 - `src/dream_rsi/orchestrator.py` — the online rollout loop.
 - `src/dream_rsi/adapters/` — wrappers for coding agents and task evaluators.
 

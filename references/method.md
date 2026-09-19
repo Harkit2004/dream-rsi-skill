@@ -66,7 +66,7 @@ Observation helpers the paper names, from `see.policy.observation_signal`:
 4. Policy-development agent revises the policy code from replay feedback
 5. Select the best version — guaranteed no worse than the incumbent — as `π_{t+1}`
 
-→ `src/dream_rsi/dream.py`, `src/dream_rsi/orchestrator.py`
+→ `src/dream_rsi/dream.py`, `src/dream_rsi/develop.py`, `src/dream_rsi/orchestrator.py`
 
 ## Components
 
