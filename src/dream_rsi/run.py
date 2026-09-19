@@ -220,7 +220,7 @@ class CycleRecord:
     rejected: int
     selection: Selection
     best_score: float | None = None
-    cost: CycleCost = CycleCost()
+    cost: CycleCost = field(default_factory=CycleCost)
     timing: CycleTiming | None = None
 
     def to_dict(self) -> dict[str, Any]:

@@ -29,7 +29,7 @@ import json
 import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -148,7 +148,7 @@ class Rollout:
     tree: DiscoveryTree
     rounds: tuple[RoundRecord, ...]
     stop_reason: str
-    cost: OnlineCost = OnlineCost()
+    cost: OnlineCost = field(default_factory=OnlineCost)
 
     def save(self, directory: str | Path) -> None:
         """Write the tree and the round log into ``directory``.
