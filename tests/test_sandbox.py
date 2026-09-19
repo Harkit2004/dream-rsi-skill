@@ -105,9 +105,9 @@ def test_a_sandboxed_baseline_replays_exactly_as_it_does_in_process(name: str) -
     in a dreaming round a number about the execution path. Compared as the whole
     serialised trajectory rather than as the score: two runs can reach the same
     ``V_i^m`` down different branches, and it is the decisions that have to
-    match. Catches a proxy that loses the revealed tree's scores or
-    observations, reorders the eligible set, drops ``W``, or fails to seed the
-    policy's generator the way replay does.
+    match. The baseline is the greedy one because it decides *from* the revealed
+    scores: dropping them, or dropping ``W``, changes its trajectory on all three
+    fixtures, where the breadth-first baseline would notice neither.
     """
     world = _world(name)
     config = DreamConfig(width=2)
@@ -121,6 +121,35 @@ def test_a_sandboxed_baseline_replays_exactly_as_it_does_in_process(name: str) -
     ).result()
 
     assert sandboxed.to_json() == in_process.to_json()
+
+
+def test_a_decision_is_shown_exactly_what_replay_passed_it() -> None:
+    """The three arguments cross the boundary unchanged, in order.
+
+    The trajectory comparison above cannot see this: the baselines sort what they
+    are given, so a proxy that reversed the eligible set would still replay
+    identically. A model-written policy that reads ``eligible[0]`` — the root, as
+    ``eligible_nodes`` orders it — would not, and neither would one that batches
+    up to ``width``.
+    """
+    tree = DiscoveryTree.load(TREES / "wide_shallow" / "tree.json")
+    # The second decision, not the first: a one-node eligible set cannot show an
+    # order, so the policy opens two branches off the root before reporting.
+    error = _failure(
+        "class OptimalPolicy:\n"
+        "    def __init__(self, config=None):\n"
+        "        self.config = dict(config or {})\n"
+        "\n"
+        "    def select(self, tree, eligible, width):\n"
+        "        if len(tree) == 1:\n"
+        "            return [eligible[0]] * 2\n"
+        "        raise ValueError("
+        "f'eligible={list(eligible)} width={width} nodes={len(tree)}')\n"
+    )
+
+    opened = sorted(node.id for node in tree.children(tree.root_id)[:2])
+    expected = [tree.root_id, *opened]
+    assert f"eligible={expected} width=2 nodes=3" in error, error
 
 
 @pytest.mark.parametrize(
