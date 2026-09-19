@@ -378,6 +378,24 @@ def test_a_resumed_run_restores_a_pool_tree_that_went_missing(tmp_path: Path) ->
     assert resumed.stats == whole.stats
 
 
+def test_a_resumed_run_restores_a_pool_tree_that_will_not_load(tmp_path: Path) -> None:
+    """A pool entry that is a name and no readable tree is a tree gone missing.
+
+    A file left half-written by an interrupted copy still lists, so a resume
+    that asked only which names the directory held would leave it in place —
+    and then fail counting the pool, with a good copy of that tree sitting in
+    the cycle directory the whole time. The name is not the tree; whether it
+    loads is.
+    """
+    whole = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+    (tmp_path / POOL_DIRNAME / "cycle_000.json").write_text('{"nodes": [', encoding="utf-8")
+
+    resumed = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+
+    assert resumed.pool == whole.pool
+    assert resumed.stats == whole.stats
+
+
 def test_a_pool_limit_bounds_the_history_a_cycle_dreams_over(tmp_path: Path) -> None:
     """Subsampling is opt-in, and what it dropped is on the record.
 

@@ -241,3 +241,17 @@ def test_a_limit_that_keeps_no_trees_is_refused(limit: int) -> None:
     """
     with pytest.raises(ValueError, match="at least one"):
         PoolConfig(limit=limit)
+
+
+@pytest.mark.parametrize("limit", [1.5, True])
+def test_a_limit_that_is_not_a_count_of_trees_is_refused(limit: object) -> None:
+    """A limit counts worlds, so anything that is not a count is a config error.
+
+    ``PoolConfig`` is the only thing between a caller and the sampler. A limit
+    of ``1.5`` clears a lower-bound check and then raises from inside
+    ``random.sample``, a whole rollout later and with the cycle's tree already
+    written; ``True`` is an ``int`` and quietly means a history of one. Both are
+    refused where they are written, for the same reason a limit of zero is.
+    """
+    with pytest.raises(ValueError, match="at least one"):
+        PoolConfig(limit=limit)  # type: ignore[arg-type]

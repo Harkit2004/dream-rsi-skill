@@ -86,11 +86,16 @@ class PoolConfig:
     seed: int = DEFAULT_SEED
 
     def __post_init__(self) -> None:
-        if self.limit is not None and self.limit < 1:
+        if self.limit is not None and (
+            not isinstance(self.limit, int) or isinstance(self.limit, bool) or self.limit < 1
+        ):
             # §3's V^m is an average over the trees replayed. A round of none of
             # them has no average to take, so this is refused where it is
-            # written rather than a cycle later.
-            raise ValueError(f"a dreaming round needs at least one world, got {self.limit}")
+            # written rather than a cycle later. A limit that is not a whole
+            # count of worlds goes the same way: it would otherwise reach the
+            # sampler a rollout later, or — for a bool, which is an int — mean a
+            # history of one without anyone asking for it.
+            raise ValueError(f"a dreaming round needs at least one world, got {self.limit!r}")
 
 
 class SimulatorPool:
@@ -128,6 +133,24 @@ class SimulatorPool:
                 if _nameable(name)
             )
         )
+
+    def holds(self, name: str) -> bool:
+        """Whether the pool has a tree of this name that reads back.
+
+        Answered by loading it, not by looking at the listing: a name with no
+        file and a name whose file will not load are the same answer to the
+        only caller that asks — the one deciding whether it has to put the tree
+        back — and a store whose point is being read in a later session owes
+        that caller the stronger of the two.
+        """
+        path = self._path(name)
+        if not path.is_file():
+            return False
+        try:
+            self._load(path)
+        except PoolError:
+            return False
+        return True
 
     def add(self, name: str, tree: DiscoveryTree) -> None:
         """Add ``tree`` under ``name``, whole or not at all.

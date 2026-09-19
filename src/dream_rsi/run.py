@@ -314,22 +314,22 @@ def _resume(
     supposed to pick, so whatever is on disk beyond the gap describes a history
     this run no longer has. They are redone rather than trusted.
 
-    A finished cycle's tree is put back into the pool if the pool has lost it,
-    from the copy the cycle itself recorded. The records say which worlds this
-    run has; dreaming over fewer of them because a pool directory was cleaned,
-    half-copied, or never written by an older run would shorten ``ℋ_t`` without
-    saying so.
+    A finished cycle's tree is put back into the pool if the pool cannot read it
+    back, from the copy the cycle itself recorded. The records say which worlds
+    this run has; dreaming over fewer of them because a pool directory was
+    cleaned, half-copied, or never written by an older run would shorten ``ℋ_t``
+    without saying so — and failing on a tree the run has a good copy of would
+    be worse still.
     """
     records: list[CycleRecord] = []
     source = policy
-    held = set(pool.names())
     for index in range(wanted):
         directory = cycles / CYCLE_TEMPLATE.format(index)
         if not (directory / RECORD_FILENAME).is_file():
             break
         record = _read_record(directory / RECORD_FILENAME)
         records.append(record)
-        if record.world not in held:
+        if not pool.holds(record.world):
             pool.add(record.world, _tree(directory / TREE_FILENAME))
         source = _read(directory / NEXT_POLICY_FILENAME)
     return records, source
