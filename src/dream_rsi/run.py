@@ -31,6 +31,14 @@ So the record existing means the cycle finished, a run resumes by reading the
 records it finds, and a cycle interrupted half-way is redone from the top rather
 than patched up. That is what makes a crash in cycle 5 cost cycle 5.
 
+**The cost report is the driver's.** Each half of a cycle counts what it spent
+where it spends it — agent calls in the rollout, model calls and revealed nodes
+in the offline phase — but the driver is the only place both halves are in
+view, so it is where they are put on one record and reported against each other
+(issue #18). §4 prices discovery in discovery-agent calls and §2 prices replay at
+nothing, and the ratio of the two is the paper's claim, so a run says what each
+half cost rather than what the cycle cost.
+
 **The pool is a store beside the cycles.** A cycle records its tree in its own
 directory, as the evidence for the record it writes, and adds it to
 :class:`~dream_rsi.pool.SimulatorPool` under the cycle's name — so what a later
@@ -47,8 +55,10 @@ import argparse
 import json
 import os
 import shutil
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from itertools import accumulate
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +66,7 @@ from dream_rsi.adapters.agent import CodingAgent
 from dream_rsi.adapters.evaluator import TaskEvaluator
 from dream_rsi.adapters.fake_developer import FakeDeveloper
 from dream_rsi.adapters.toy_search import ToySearchAgent, ToySearchEvaluator, plan_source
+from dream_rsi.cost import CycleCost, CycleTiming, DreamCost, total
 from dream_rsi.develop import DEFAULT_ATTEMPTS, PolicyDeveloper, develop
 from dream_rsi.dream import DEFAULT_VERSIONS, DreamConfig, Selection, select
 from dream_rsi.orchestrator import (
@@ -77,6 +88,7 @@ __all__ = [
     "POLICY_FILENAME",
     "POOL_DIRNAME",
     "RECORD_FILENAME",
+    "TIMING_FILENAME",
     "CycleRecord",
     "Run",
     "RunConfig",
@@ -98,6 +110,13 @@ POLICY_FILENAME = "policy.py"
 NEXT_POLICY_FILENAME = "next_policy.py"
 RECORD_FILENAME = "cycle.json"
 WORKSPACE_DIRNAME = "workspace"
+
+# How long the cycle took, beside the record rather than in it: the record is a
+# function of the run's seed and a clock is a function of the machine (see
+# ``cost.CycleTiming``). A cycle whose timing is missing is still a finished
+# cycle — only the record says that — so this file is read where it is there and
+# nothing fails where it is not.
+TIMING_FILENAME = "timing.json"
 
 # The toy wiring ``main`` runs: candidates spanning the landscape in
 # ``adapters/toy_search.py``, so a rollout over them is choosing between real
@@ -178,8 +197,18 @@ class CycleRecord:
     and ``rejected`` the count of outputs the harness refused along the way
     (``develop.Rejection``). ``selection`` names ``π_{t+1}``.
 
-    Counting what a cycle *cost* — agent calls, node reveals, wall clock, and the
-    online-versus-dreaming split — is issue #18, and deliberately not here.
+    ``best_score`` is the best ``s_v`` this cycle's own rollout recorded — the
+    discovery quality §4 plots against cumulative agent calls — in the canonical
+    direction node scores are stored in, so it is comparable across cycles and
+    across tasks that do not run larger-is-better. It is ``None`` where the cycle
+    scored nothing at all.
+
+    ``cost`` is what the cycle spent on each side of the loop (issue #18).
+    ``timing`` is how long that took, and is the one thing here that is not a
+    function of the run's seed: it is read from ``timing.json`` beside the record
+    and deliberately absent from :meth:`to_dict`, so two runs under one seed
+    write identical records (working rule 5). It is ``None`` for a cycle whose
+    timing file is missing.
     """
 
     index: int
@@ -190,6 +219,9 @@ class CycleRecord:
     versions: tuple[str, ...]
     rejected: int
     selection: Selection
+    best_score: float | None = None
+    cost: CycleCost = field(default_factory=CycleCost)
+    timing: CycleTiming | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -201,6 +233,8 @@ class CycleRecord:
             "versions": list(self.versions),
             "rejected": self.rejected,
             "selection": self.selection.to_dict(),
+            "best_score": self.best_score,
+            "cost": self.cost.to_dict(),
         }
 
     @classmethod
@@ -229,6 +263,8 @@ class CycleRecord:
                 incumbent_score=selection["incumbent_score"],
                 rationale=str(selection["rationale"]),
             ),
+            best_score=None if payload["best_score"] is None else float(payload["best_score"]),
+            cost=CycleCost.from_dict(payload["cost"]),
         )
 
 
@@ -246,6 +282,129 @@ class Run:
     policy: str
     pool: tuple[str, ...]
     stats: PoolStats
+
+    @classmethod
+    def load(cls, directory: str | Path) -> Run:
+        """Read a run back out of its directory, with nothing live behind it.
+
+        What :func:`run_cycles` would have returned, assembled from the cycle
+        records, the policy the last of them selected and the pool on disk — no
+        agent, no evaluator and no developer, because a report is read after the
+        process that produced it is gone. The cycles are those with a record, in
+        order and stopped at the first gap, for the reason :func:`_resume` gives.
+        """
+        directory = Path(directory)
+        cycles = directory / CYCLES_DIRNAME
+        records = tuple(record for _, record in _finished(cycles))
+        pool = SimulatorPool(directory / POOL_DIRNAME)
+        # A run with no finished cycle never selected anything, so there is no π
+        # it would deploy next; π_1 was the caller's and is not on disk.
+        policy = (
+            _read(_cycle_dir(cycles, records[-1].index) / NEXT_POLICY_FILENAME)
+            if records
+            else ""
+        )
+        return cls(
+            cycles=records,
+            policy=policy,
+            pool=pool.names(),
+            stats=pool.stats(),
+        )
+
+    @property
+    def totals(self) -> CycleCost:
+        """What the whole run spent, half by half — §4's *cumulative* cost.
+
+        Summed from the records, so a resumed run totals the cycles it read back
+        as well as the ones it ran: the cost of a cycle is the cycle's, not the
+        session's.
+        """
+        return total(record.cost for record in self.cycles)
+
+    @property
+    def best_score(self) -> float | None:
+        """The best ``s_v`` any cycle of this run recorded, or ``None`` if none did."""
+        scored = [record.best_score for record in self.cycles if record.best_score is not None]
+        return max(scored) if scored else None
+
+    def to_text(self) -> str:
+        """The run report: quality against cost, cycle by cycle (issue #18).
+
+        One row per cycle, carrying what the cycle discovered, what each half of
+        it spent and which version it selected, under a header that states the
+        split the paper's claim rests on. The rationale lines beneath say why
+        each of those versions was the one deployed next, in the selection's own
+        words (``dream.Selection``), because a run that changed policy five times
+        and cannot say why is not a report.
+        """
+        # §4 plots discovery quality against the *cumulative* number of
+        # discovery-agent calls, so the report carries the running total beside
+        # each cycle's own rather than leaving the reader to add them up.
+        cumulative = list(accumulate(record.cost.online.agent_calls for record in self.cycles))
+        rows = [
+            [
+                str(record.index),
+                _quality(record.best_score),
+                str(record.cost.online.agent_calls),
+                str(spent),
+                str(record.cost.online.evaluations),
+                _seconds(None if record.timing is None else record.timing.online_seconds),
+                str(record.cost.dreaming.developer_calls),
+                str(record.cost.dreaming.cells),
+                str(record.cost.dreaming.reveals),
+                _seconds(None if record.timing is None else record.timing.dreaming_seconds),
+                record.selection.winner,
+            ]
+            for record, spent in zip(self.cycles, cumulative, strict=True)
+        ]
+        header = [
+            "cycle",
+            "best",
+            "online.calls",
+            "online.total",
+            "online.evals",
+            "online.s",
+            "dream.calls",
+            "dream.cells",
+            "dream.reveals",
+            "dream.s",
+            "selected",
+        ]
+        widths = [max(len(row[column]) for row in (header, *rows)) for column in range(len(header))]
+
+        totals = self.totals
+        lines = [
+            f"run: {len(self.cycles)} cycle(s), best score {_quality(self.best_score)}",
+            # The two halves side by side and never summed: §4 counts discovery
+            # in agent calls, §2 prices replay at nothing, and what a reader
+            # needs is the ratio between them rather than a total across them.
+            (
+                f"cost split: {totals.online.agent_calls} online agent call(s) "
+                f"against {totals.dreaming.developer_calls} policy-development call(s) "
+                f"and {totals.dreaming.cells} replay cell(s) revealing "
+                f"{totals.dreaming.reveals} node(s)"
+            ),
+            f"  {_leverage(totals.leverage)} replayed node(s) per online agent call",
+            (
+                f"pool: {self.stats.trees} tree(s), {self.stats.nodes} node(s), "
+                f"{self.stats.bytes} byte(s) on disk"
+            ),
+            "",
+            *(
+                "  ".join(cell.rjust(width) for cell, width in zip(row, widths))
+                for row in (header, *rows)
+            ),
+        ]
+        if self.cycles:
+            lines += [
+                "",
+                "selection:",
+                *(
+                    f"  cycle {record.index}: {record.selection.rationale}"
+                    for record in self.cycles
+                ),
+            ]
+        return "\n".join(lines) + "\n"
 
 
 def run_cycles(
@@ -323,16 +482,34 @@ def _resume(
     """
     records: list[CycleRecord] = []
     source = policy
-    for index in range(wanted):
-        directory = cycles / CYCLE_TEMPLATE.format(index)
-        if not (directory / RECORD_FILENAME).is_file():
-            break
-        record = _read_record(directory / RECORD_FILENAME)
+    for directory, record in _finished(cycles, wanted):
         records.append(record)
         if not pool.holds(record.world):
             pool.add(record.world, _tree(directory / TREE_FILENAME))
         source = _read(directory / NEXT_POLICY_FILENAME)
     return records, source
+
+
+def _finished(cycles: Path, wanted: int | None = None) -> list[tuple[Path, CycleRecord]]:
+    """The finished cycles under ``cycles``, in order, stopped at the first gap.
+
+    ``wanted`` bounds how many are looked for; without one the walk runs until it
+    finds a cycle directory with no record, which is what reading a run back
+    needs (:meth:`Run.load`) and what resuming one needs bounded.
+    """
+    found: list[tuple[Path, CycleRecord]] = []
+    index = 0
+    while wanted is None or index < wanted:
+        directory = _cycle_dir(cycles, index)
+        if not (directory / RECORD_FILENAME).is_file():
+            break
+        found.append((directory, _read_record(directory)))
+        index += 1
+    return found
+
+
+def _cycle_dir(cycles: Path, index: int) -> Path:
+    return cycles / CYCLE_TEMPLATE.format(index)
 
 
 def _cycle(
@@ -361,6 +538,7 @@ def _cycle(
 
     # 1. Deploy π_t online. Behind the sandbox because the source is whatever the
     # development agent wrote and this run selected.
+    started = time.monotonic()
     with SandboxedPolicy(
         source, limits=config.limits, scratch_root=scratch_root
     ) as deployed:
@@ -382,6 +560,7 @@ def _cycle(
             # implementation lands (see references/method.md).
             config=replace(config.rollout, seed=config.rollout.seed + index),
         )
+    online_seconds = time.monotonic() - started
     rollout.save(cycle)
 
     # 2. Append 𝒯_t to the history: ℋ_t = ℋ_{t-1} ∪ {𝒯_t} (§3). Into the pool
@@ -393,6 +572,7 @@ def _cycle(
 
     # 3 and 4. Dream M versions over ℋ_t, each revised from the last one's replay
     # feedback, then 5: select π_{t+1}, which §3 guarantees is no worse than π_t.
+    started = time.monotonic()
     development = develop(
         source,
         pool.worlds(dreamed),
@@ -404,9 +584,14 @@ def _cycle(
         scratch_root=scratch_root,
     )
     selection = select(development.comparison)
+    dreaming_seconds = time.monotonic() - started
     chosen = {version.name: version.source for version in development.versions}[selection.winner]
     _write(cycle / NEXT_POLICY_FILENAME, chosen)
 
+    # What the cycle cost, each half counted by the half that spent it (issue
+    # #18): the rollout knows its calls and its evaluations, and the offline
+    # phase its model calls and the grid it replayed.
+    timing = CycleTiming(online_seconds=online_seconds, dreaming_seconds=dreaming_seconds)
     record = CycleRecord(
         index=index,
         world=name,
@@ -416,9 +601,34 @@ def _cycle(
         versions=tuple(version.name for version in development.versions),
         rejected=len(development.rejected),
         selection=selection,
+        best_score=_best_score(rollout.tree),
+        cost=CycleCost(
+            online=rollout.cost,
+            dreaming=DreamCost(
+                developer_calls=development.calls,
+                cells=development.comparison.cells,
+                reveals=development.comparison.reveals,
+            ),
+        ),
+        timing=timing,
     )
+    # Before the record, which is what marks the cycle finished: a cycle the
+    # resumed run trusts is one whose timing is already beside it.
+    _write(cycle / TIMING_FILENAME, json.dumps(timing.to_dict(), indent=2, sort_keys=True) + "\n")
     _write_record(cycle / RECORD_FILENAME, record)
     return record, chosen
+
+
+def _best_score(tree: DiscoveryTree) -> float | None:
+    """The best ``s_v`` in a recorded tree, or ``None`` where nothing scored.
+
+    Node scores are canonical — ``EvalResult.to_node_fields`` has already turned
+    the task's own direction round — so the best is the largest whichever way the
+    task's metric runs, and the root, which has no score, is excluded with every
+    attempt that failed to produce one.
+    """
+    scores = [node.score for node in tree.iter_nodes() if node.score is not None]
+    return max(scores) if scores else None
 
 
 def _tree(path: Path) -> DiscoveryTree:
@@ -440,11 +650,44 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _read_record(path: Path) -> CycleRecord:
+def _read_record(directory: Path) -> CycleRecord:
+    """One finished cycle's record, with the timing that was written beside it."""
+    path = directory / RECORD_FILENAME
     try:
-        return CycleRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        record = CycleRecord.from_dict(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise RunError(f"{path} is not a readable cycle record: {exc}") from exc
+    return replace(record, timing=_read_timing(directory / TIMING_FILENAME))
+
+
+def _read_timing(path: Path) -> CycleTiming | None:
+    """How long the cycle took, or ``None`` where that was not recorded.
+
+    Missing is not broken: the record is what says a cycle finished, and a run
+    whose report is a clock short still spent every call it spent. A file that is
+    there and unreadable is a different matter and says so.
+    """
+    if not path.is_file():
+        return None
+    try:
+        return CycleTiming.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise RunError(f"{path} is not a readable cycle timing: {exc}") from exc
+
+
+def _quality(score: float | None) -> str:
+    """A best score as the report states it; ``none`` where the cycle scored nothing."""
+    return "none" if score is None else f"{score:.4f}"
+
+
+def _seconds(elapsed: float | None) -> str:
+    """A measured duration for the report, or ``-`` where none was recorded."""
+    return "-" if elapsed is None else f"{elapsed:.2f}"
+
+
+def _leverage(ratio: float | None) -> str:
+    """The replay-per-call ratio, or ``none`` for a run that made no calls."""
+    return "none" if ratio is None else f"{ratio:.2f}"
 
 
 def _write_record(path: Path, record: CycleRecord) -> None:
@@ -514,16 +757,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pool=PoolConfig(limit=args.pool_limit, seed=args.seed),
         ),
     )
-    for record in run.cycles:
-        print(
-            f"cycle {record.index}: {record.attempts} attempt(s), stopped on "
-            f"{record.stop_reason}, dreamed {len(record.versions)} version(s) over "
-            f"{len(record.pool)} world(s) -> {record.selection.rationale}"
-        )
-    print(
-        f"pool: {run.stats.trees} tree(s), {run.stats.nodes} node(s), "
-        f"{run.stats.bytes} byte(s) on disk"
-    )
+    print(run.to_text(), end="")
     return 0
 
 

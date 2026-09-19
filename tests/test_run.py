@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from dream_rsi.adapters.toy_search import ToySearchAgent, ToySearchEvaluator, plan_source
+from dream_rsi.cost import DreamCost, OnlineCost
 from dream_rsi.develop import RevisionContext
 from dream_rsi.dream import DreamConfig
 from dream_rsi.orchestrator import (
@@ -38,6 +39,7 @@ from dream_rsi.run import (
     POLICY_FILENAME,
     POOL_DIRNAME,
     RECORD_FILENAME,
+    TIMING_FILENAME,
     Run,
     RunConfig,
     run_cycles,
@@ -132,6 +134,8 @@ def _run(
     policy: str = BREADTH_SOURCE,
     scratch_root: Path | None = None,
     pool: PoolConfig | None = None,
+    workers: int = 2,
+    rounds: int = 4,
 ) -> Run:
     """A toy run in ``directory``: two versions a cycle, over the toy landscape."""
     return run_cycles(
@@ -143,8 +147,8 @@ def _run(
         directory=directory,
         config=RunConfig(
             cycles=cycles,
-            rollout=RolloutConfig(workers=2, max_rounds=4, max_nodes=16, seed=0),
-            dreaming=DreamConfig(width=2),
+            rollout=RolloutConfig(workers=workers, max_rounds=rounds, max_nodes=16, seed=0),
+            dreaming=DreamConfig(width=workers),
             # Two: the incumbent and one revision, which is the smallest round
             # that can select anything other than what it started with.
             versions=2,
@@ -418,3 +422,189 @@ def test_a_pool_limit_bounds_the_history_a_cycle_dreams_over(tmp_path: Path) -> 
     ]
     assert run.pool == ("cycle_000", "cycle_001", "cycle_002")
     assert run.stats.trees == 3
+
+
+# π_1 for the hand count: every round opens one more branch from the root and
+# does nothing else, online and in replay alike. So what it records is a star —
+# one round, one attempt, one child of the root — and a replay of that star
+# reveals one node per round until there are none left. Both halves of a cycle
+# are then countable from the config alone.
+STAR_SOURCE = """\
+class OptimalPolicy:
+    def __init__(self, config=None):
+        self.config = dict(config or {})
+
+    def select(self, tree, eligible, width):
+        return (tree.root_id,) * width
+"""
+
+# The revision the hand count's developer answers with: one reveal and then the
+# empty batch, so its row of the grid is a different number from the incumbent's
+# and a harness that reported one of them twice is visible.
+ONE_REVEAL_SOURCE = """\
+class OptimalPolicy:
+    def __init__(self, config=None):
+        self.config = dict(config or {})
+        self.spent = 0
+
+    def reset(self, rng=None):
+        self.spent = 0
+
+    def select(self, tree, eligible, width):
+        self.spent += 1
+        return (tree.root_id,) if self.spent == 1 else ()
+"""
+
+
+def test_a_cycle_costs_exactly_what_the_hand_count_says(tmp_path: Path) -> None:
+    """Issue #18's first "tests first": the counters against a run counted by hand.
+
+    One cycle at ``W = 1`` over three rounds, under a policy that opens one
+    branch from the root per round. Every number follows from that:
+
+    * three attempts, so three discovery-agent calls (§4's discovery cost) and
+      three evaluations, since the toy agent raises on none of them;
+    * two versions — the incumbent and the one revision the developer answers
+      with — over the one world this cycle appended, so two replayed cells and
+      one policy-development call;
+    * the incumbent replaying its own star reveals all three recorded attempts,
+      the revision stops after one, so four revealed nodes in all.
+
+    A driver that counted rounds instead of attempts, cells instead of reveals,
+    or the whole pool instead of this cycle's replays fails on one of them.
+    """
+    developer = ScriptedDeveloper(script=(ONE_REVEAL_SOURCE,))
+
+    run = _run(tmp_path, developer, cycles=1, policy=STAR_SOURCE, workers=1, rounds=3)
+
+    cost = run.cycles[0].cost
+    assert cost.online == OnlineCost(agent_calls=3, evaluations=3)
+    assert cost.dreaming == DreamCost(developer_calls=1, cells=2, reveals=4)
+
+    # The cycle's best score is the best ``s_v`` in the tree that cycle recorded,
+    # not the last one attempted and not one from another cycle.
+    tree = DiscoveryTree.load(_cycle_dir(tmp_path, 0) / TREE_FILENAME)
+    assert run.cycles[0].best_score == max(
+        node.score for node in tree.iter_nodes() if node.score is not None
+    )
+
+
+def test_a_resumed_run_does_not_count_the_cycles_it_already_did_twice(tmp_path: Path) -> None:
+    """Issue #18's second "tests first": resuming re-reads costs, it does not re-spend them.
+
+    Three invocations against one directory — two cycles, then the third, then
+    one with nothing left to do — against an uninterrupted run of the same three
+    cycles. The totals have to agree with it every time. A driver that added what
+    it spent this session to what the records it read back already said doubles
+    the cycles it redid; one that counted only this session's work loses the
+    cycles it resumed.
+    """
+    whole = _run(tmp_path / "whole", ScriptedDeveloper(), cycles=3)
+
+    resumed_dir = tmp_path / "resumed"
+    _run(resumed_dir, ScriptedDeveloper(), cycles=2)
+    resumed = _run(resumed_dir, ScriptedDeveloper(), cycles=3)
+    again = _run(resumed_dir, ScriptedDeveloper(), cycles=3)
+
+    assert [record.cost for record in resumed.cycles] == [
+        record.cost for record in whole.cycles
+    ]
+    assert resumed.totals == whole.totals
+    assert again.totals == whole.totals
+    # Against the records rather than against another total, so a run that
+    # totalled some of its cycles agrees with itself and still fails here.
+    assert again.totals.online.agent_calls == sum(
+        record.cost.online.agent_calls for record in whole.cycles
+    )
+    assert again.totals.dreaming.reveals == sum(
+        record.cost.dreaming.reveals for record in whole.cycles
+    )
+
+
+def test_the_report_renders_from_a_run_read_back_off_disk(tmp_path: Path) -> None:
+    """Issue #18's third "tests first": the report needs the directory and nothing else.
+
+    :meth:`Run.load` builds a run out of the cycle records, the pool and the
+    policy on disk, with no agent, no evaluator and no developer behind it — the
+    state a run is in once the process that made it is gone. What it renders has
+    to be what the run itself rendered, including the line saying why each
+    cycle's version was the one deployed next. A report that reached for
+    anything the cycles did not record cannot be produced here at all.
+    """
+    run = _run(tmp_path, ScriptedDeveloper(), cycles=2)
+
+    loaded = Run.load(tmp_path)
+
+    assert loaded.cycles == run.cycles
+    assert loaded.policy == run.policy
+    assert loaded.to_text() == run.to_text()
+    for record in run.cycles:
+        assert record.selection.rationale in loaded.to_text()
+
+
+def test_the_toy_loop_reports_the_cost_split_from_the_command_line(tmp_path: Path) -> None:
+    """Issue #18's "done when": a 3-cycle toy run emits a report showing the split.
+
+    The ratio between the two halves is the paper's whole argument, so the run
+    has to say what each of them spent without the reader adding anything up.
+    The numbers printed are checked against the records on disk rather than
+    against constants, so this fails on a report that prints one half twice or
+    totals only the cycles of the session that happened to print it.
+    """
+    target = tmp_path / "run"
+    completed = subprocess.run(
+        [sys.executable, "-m", "dream_rsi.run", "--cycles", "3", str(target)],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    records = [
+        json.loads((_cycle_dir(target, index) / RECORD_FILENAME).read_text(encoding="utf-8"))
+        for index in range(3)
+    ]
+    calls = sum(record["cost"]["online"]["agent_calls"] for record in records)
+    reveals = sum(record["cost"]["dreaming"]["reveals"] for record in records)
+    assert calls > 0 and reveals > 0
+    assert f"{calls} online agent call(s)" in completed.stdout
+    assert f"{reveals} node(s)" in completed.stdout
+
+
+def test_a_cycle_whose_timing_went_missing_is_still_a_finished_cycle(tmp_path: Path) -> None:
+    """The record vouches for a cycle; the clock written beside it does not.
+
+    Wall clock is kept out of the record because a record is a function of the
+    run's seed and a clock is a function of the machine — so it is a second file,
+    and a second file is one a cleaner, a half-copied run directory or a run
+    older than this report can leave behind. Everything the cycle spent is on the
+    record either way, so a driver that insisted on the timing would redo a cycle
+    it already has and pay for it a second time.
+    """
+    run = _run(tmp_path, ScriptedDeveloper(), cycles=1)
+    (_cycle_dir(tmp_path, 0) / TIMING_FILENAME).unlink()
+
+    developer = ScriptedDeveloper()
+    resumed = _run(tmp_path, developer, cycles=1)
+
+    assert developer.calls == []
+    assert resumed.totals == run.totals
+    assert resumed.cycles[0].timing is None
+    assert Run.load(tmp_path).to_text() == resumed.to_text()
+
+
+def test_a_run_with_no_finished_cycle_reports_that_and_not_a_traceback(tmp_path: Path) -> None:
+    """The report of a run that crashed in cycle 0 is a report with nothing in it.
+
+    That directory is exactly what a report is read from — someone is looking
+    because the run stopped — so rendering it must not divide the reveals by no
+    agent calls or reach for a policy no cycle ever selected.
+    """
+    (tmp_path / CYCLES_DIRNAME).mkdir(parents=True)
+
+    run = Run.load(tmp_path)
+
+    assert run.cycles == ()
+    assert run.policy == ""
+    assert "0 cycle(s)" in run.to_text()
