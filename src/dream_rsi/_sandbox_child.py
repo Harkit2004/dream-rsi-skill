@@ -17,19 +17,24 @@ single line of its source is compiled:
    scratch directory it may write in is still a directory on a real filesystem.
 2. **An audit hook** (:func:`sys.addaudithook`), which refuses the network,
    starting or signalling processes, importing the modules that would step
-   around this hook, and writing anywhere but the scratch directory. Reads are
-   left alone: the candidate has to be able to import ``dream_rsi.policy``.
-   An audit hook cannot be removed once installed, and it is installed before
-   the candidate exists.
+   around this hook, writing anywhere but the scratch directory, and reading
+   anywhere but the scratch directory, the ``dream_rsi`` package and the Python
+   installation the candidate is imported from. An audit hook cannot be removed
+   once installed, and it is installed before the candidate exists.
 3. **The process boundary itself**, which is what actually contains a hang: the
    parent kills this process group when a request outlives its deadline.
 
-Layer 2 restricts *writes*, and reads only incidentally: a candidate has to be
-able to read the ``dream_rsi`` package and the standard library to import its own
-base class, so there is no read rule here that a legal policy would survive. One
-consequence is worth naming rather than leaving to be discovered — a candidate
-can read a recorded tree off disk and see scores it never revealed, which issue
-#39 covers.
+Layer 2 is a rule about *opening*, not about using: a path may be opened for
+writing only inside the scratch directory, and for reading only inside the roots
+of :func:`_readable_roots`. Reads have to stay open far enough for a candidate to
+import its own base class and narrow enough that the recorded world is not
+readable — the fixtures sit on disk at a fixed path, and a real simulator pool's
+corpus will too, so a candidate that opened a ``tree.json`` could read the
+``s_v`` of nodes it never revealed and defeat the prefix-observability §3/§B.2
+are built on ("Never use unrevealed scores, a true optimum, hardcoded winning
+cell ids"). Issue #39 is that leak, closed here; the false-refusal risk the issue
+weighs (a legal candidate recorded as scoring nothing) is what
+:func:`_readable_roots` is sized against.
 
 Layer 2 is Python-level and therefore the weakest of the three — code reaching
 the C level around it (``ctypes``, which is why it is refused) is not stopped by
@@ -118,6 +123,7 @@ class _Guard:
 
     def __init__(self, scratch: str) -> None:
         self._scratch = os.path.realpath(scratch)
+        self._roots = _readable_roots(self._scratch)
 
     def __call__(self, event: str, args: tuple[Any, ...]) -> None:
         if event.startswith("socket."):
@@ -132,26 +138,85 @@ class _Guard:
             )
         if event == "open":
             path, mode, flags = (tuple(args) + (None, None, None))[:3]
+            # One event covers both directions (``_is_write``), and the two rules
+            # answer different questions: where may a candidate *put* a file, and
+            # where may it *take* one from.
             if _is_write(mode, flags):
                 self._inside(path)
+            else:
+                self._read(path)
             return
         for index in _PATH_EVENTS.get(event, ()):
             if index < len(args):
                 self._inside(args[index])
 
-    def _inside(self, path: Any) -> None:
-        """Refuse a path outside the scratch directory."""
-        if isinstance(path, int):
-            # An already-open descriptor, so whatever opened it was audited.
+    def _read(self, path: Any) -> None:
+        """Refuse a read of anything a candidate does not need to decide."""
+        resolved = self._resolve(path)
+        if resolved is None or any(_under(resolved, root) for root in self._roots):
             return
+        raise SandboxViolation(f"policy code may not read outside its sandbox: {resolved}")
+
+    def _inside(self, path: Any) -> None:
+        """Refuse a write outside the scratch directory."""
+        resolved = self._resolve(path)
+        if resolved is None or _under(resolved, self._scratch):
+            return
+        raise SandboxViolation(
+            f"policy code may not write outside its scratch directory: {resolved}"
+        )
+
+    def _resolve(self, path: Any) -> str | None:
+        """The named path, resolved; ``None`` for a descriptor that is already open.
+
+        An integer names an open descriptor (``os.fdopen``), and whatever opened
+        it was audited then: both rules are about opening, not about using what
+        is already open.
+        """
+        if isinstance(path, int):
+            return None
         try:
-            resolved = os.path.realpath(os.fsdecode(path))
+            return os.path.realpath(os.fsdecode(path))
         except (TypeError, ValueError, UnicodeDecodeError) as exc:
             raise SandboxViolation(f"policy code named a path the sandbox cannot check: {exc}")
-        if resolved != self._scratch and not resolved.startswith(self._scratch + os.sep):
-            raise SandboxViolation(
-                f"policy code may not write outside its scratch directory: {resolved}"
-            )
+
+
+def _under(path: str, root: str) -> bool:
+    """Whether a resolved ``path`` is ``root`` itself or inside it."""
+    return path == root or path.startswith(root + os.sep)
+
+
+def _readable_roots(scratch: str) -> tuple[str, ...]:
+    """Where a candidate may open a file to read: three kinds of place, no more.
+
+    A legal candidate imports ``dream_rsi.policy`` and whatever standard library
+    it needs (§B.2's skeleton is a subclass of the package's base class), and the
+    import machinery reads those as files: the package's own directory, the
+    standard library and site directory under the Python installation, and the
+    scratch directory a policy may keep notes in.
+
+    Every prefix spelling the interpreter offers is allowed — ``prefix``,
+    ``exec_prefix`` and the ``base_`` pair — because a virtual environment serves
+    the standard library out of its base installation and its own site-packages
+    out of ``prefix``, so allowing only one of them refuses a legal import on
+    some installs and not others. The cost weighed the other way (issue #39) is
+    a read rule too tight to import: a wrongly-failed candidate is recorded as
+    scoring nothing, which is worse than the directory names a wider root lets
+    it see.
+
+    PAPER-GAP: the paper is explicit that a policy decides from the revealed
+    prefix (§3, §B.2) but says nothing about how the unrevealed part of the tree
+    is kept out of a policy's reach — its implementation is unreleased. These
+    roots are our choice: the smallest set that keeps every import a policy is
+    told to write working. Revisit if the authors' implementation lands (see
+    references/method.md).
+    """
+    roots = {scratch, os.path.dirname(os.path.realpath(__file__))}
+    for name in ("prefix", "exec_prefix", "base_prefix", "base_exec_prefix"):
+        value = getattr(sys, name, None)
+        if value:
+            roots.add(os.path.realpath(value))
+    return tuple(sorted(roots))
 
 
 def _is_write(mode: Any, flags: Any) -> bool:
