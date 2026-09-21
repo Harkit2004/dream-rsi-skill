@@ -11,3 +11,4 @@ build/
 runs/
 trees/
 !tests/fixtures/trees/
+graphify-out/
