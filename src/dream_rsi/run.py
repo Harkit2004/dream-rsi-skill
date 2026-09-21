@@ -657,15 +657,20 @@ def run_cycles(
 def _check_manifest(path: Path, manifest: RunManifest, cycles: Path) -> None:
     """Hold a resumed run to what its cycles were produced under (issue #45).
 
-    Called before any cycle is accepted. A directory with no finished cycle has
-    no history to mismatch — a run whose first cycle never finished is still a
-    run about to start — so the manifest there is this run's to write. Once a
-    cycle has finished, the manifest is the directory's: a run resumed under
-    another configuration is refused rather than appended to, and so is a
+    Called before any cycle is accepted. A directory whose first cycle has no
+    record has no history to mismatch — records are written in order and
+    :func:`_finished` stops at the first gap, so nothing beyond it counts — and
+    the manifest there is this run's to write. That one file is checked rather
+    than a walk over the records: which of them this session will read is
+    :func:`_resume`'s to say, and a corrupt record a bounded resume never
+    touches must not stop one.
+
+    Once a cycle has finished, the manifest is the directory's: a run resumed
+    under another configuration is refused rather than appended to, and so is a
     directory whose cycles have no manifest at all, since nothing can then say
     whether the two match.
     """
-    if not _finished(cycles):
+    if not (_cycle_dir(cycles, 0) / RECORD_FILENAME).is_file():
         _write(path, json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n")
         return
     if not path.is_file():
