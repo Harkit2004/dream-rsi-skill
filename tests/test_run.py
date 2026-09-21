@@ -332,15 +332,16 @@ def test_a_resume_under_a_different_worker_count_still_resumes(tmp_path: Path) -
     unable to move a reported number. Both are properties of the machine a
     session happens to run on, so a manifest that compared them would refuse a
     resume that changes nothing about the history. The width, which does change
-    it, is held fixed here.
+    it, is held fixed here, and the resumed run goes on to a third cycle so the
+    new workers actually run rather than the refusal merely not firing.
     """
     _run(tmp_path, ScriptedDeveloper(), cycles=2, workers=1, dreaming=DreamConfig(width=1))
 
     resumed = _run(
-        tmp_path, ScriptedDeveloper(), cycles=2, workers=4, dreaming=DreamConfig(width=1, workers=4)
+        tmp_path, ScriptedDeveloper(), cycles=3, workers=4, dreaming=DreamConfig(width=1, workers=4)
     )
 
-    assert len(resumed.cycles) == 2
+    assert len(resumed.cycles) == 3
 
 
 def test_the_manifest_is_written_before_the_first_cycle(tmp_path: Path) -> None:

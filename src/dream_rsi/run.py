@@ -229,7 +229,7 @@ class RunManifest:
     develops, and the sandbox ``limits`` every policy runs behind.
 
     Which of those have to match was the decision this class exists to record.
-    Three deliberately do not:
+    These deliberately do not:
 
     * ``RolloutConfig.workers`` and ``DreamConfig.workers`` — how many things a
       machine runs at once. The first "changes how long a rollout takes and
