@@ -15,6 +15,7 @@ loader rejects any on-disk node that tries to express one.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
@@ -51,7 +52,7 @@ class TreeError(ValueError):
 
 
 class TreeInvariantError(TreeError):
-    """A tree invariant (single root, one parent, unique ids, no cycles) is broken."""
+    """A tree invariant is broken, or the tree cannot be written as standard JSON."""
 
 
 class SchemaVersionError(TreeError):
@@ -110,6 +111,10 @@ class Node:
         score = payload.get("score")
         if score is not None and not isinstance(score, (int, float)):
             raise TreeInvariantError(f"node {node_id!r}: score must be a number or null")
+        if isinstance(score, float) and not math.isfinite(score):
+            raise TreeInvariantError(
+                f"node {node_id!r}: score must be a finite number, got {score!r}"
+            )
 
         diagnostics = payload.get("diagnostics", {})
         if not isinstance(diagnostics, dict):
@@ -224,7 +229,18 @@ class DiscoveryTree:
         return tree
 
     def save(self, path: str | Path) -> None:
-        text = json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n"
+        """Write the canonical serialisation, or fail before touching ``path``.
+
+        ``allow_nan=False`` because Python writes a non-finite score as a bare
+        ``NaN`` or ``Infinity`` token that no other JSON reader accepts. A tree
+        that only this module can read back is not the portable record a
+        discovery run is inspected from, so a tree carrying one fails here
+        rather than on whoever reads it.
+        """
+        try:
+            text = json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False) + "\n"
+        except (TypeError, ValueError) as exc:
+            raise TreeInvariantError(f"this tree cannot be written as standard JSON: {exc}") from exc
         Path(path).write_text(text, encoding="utf-8")
 
     @classmethod

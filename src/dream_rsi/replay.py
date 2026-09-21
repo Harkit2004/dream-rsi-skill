@@ -45,7 +45,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from dream_rsi.tree import DiscoveryTree, Node, eligible_nodes
+from dream_rsi.tree import DiscoveryTree, Node, TreeInvariantError, eligible_nodes
 
 __all__ = [
     "DEFAULT_SEED",
@@ -177,8 +177,18 @@ def _detached(node: Node) -> Node:
     recording — the one thing a frozen world must make impossible. The
     round-trip through the node's own serialisation copies the mutable parts,
     because ``to_dict`` goes through ``dataclasses.asdict``.
+
+    The round-trip also runs the tree loader's checks, so a node that could not
+    be written as a tree cannot enter a world: a non-finite score is refused
+    here before any trajectory exists to hold it (issue #34). The tree error is
+    translated into ``TrajectoryError`` so replay keeps one error type for "this
+    world cannot be recorded", as ``pool`` and ``run`` translate a tree that
+    will not load into an error of their own.
     """
-    return Node.from_dict(node.to_dict())
+    try:
+        return Node.from_dict(node.to_dict())
+    except TreeInvariantError as exc:
+        raise TrajectoryError(f"node {node.id!r} cannot be copied into a replay: {exc}") from exc
 
 
 class ReplayPolicy(Protocol):

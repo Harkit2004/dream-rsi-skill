@@ -163,3 +163,57 @@ def test_node_lookup_of_unknown_id_raises():
     tree = DiscoveryTree.with_root()
     with pytest.raises(KeyError):
         tree.node("nope")
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_score_fails_to_load(tmp_path, score):
+    """A stored score the evaluator protocol cannot produce is refused.
+
+    ``json.loads`` decodes the bare ``NaN`` and ``Infinity`` tokens Python
+    writes, so a tree written by anything can carry one. A NaN compares false
+    against every score — it could never be selected as best and never ruled
+    out — and an infinity makes Equation 1's ``max_v s_v`` infinite, which
+    ``scoring.replay_score`` refuses.
+    """
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "nodes": [
+            {"id": "root", "parent_id": None},
+            {"id": "a", "parent_id": "root", "score": score},
+        ],
+    }
+    path = _write(tmp_path / "tree.json", payload)
+    with pytest.raises(TreeInvariantError, match="finite"):
+        DiscoveryTree.load(path)
+
+
+@pytest.mark.parametrize("score", [0.0, -2.0, 0.5])
+def test_a_finite_score_still_loads(tmp_path, score):
+    """Negative scores are ordinary: lower-is-better tasks convert to canonical units."""
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "nodes": [
+            {"id": "root", "parent_id": None},
+            {"id": "a", "parent_id": "root", "score": score},
+        ],
+    }
+    path = _write(tmp_path / "tree.json", payload)
+
+    assert DiscoveryTree.load(path).node("a").score == score
+
+
+@pytest.mark.parametrize("score", [float("nan"), float("inf"), float("-inf")])
+def test_a_tree_holding_a_non_finite_score_fails_to_save(tmp_path, score):
+    """The write refuses rather than emitting a token only this code can read.
+
+    ``add_child`` still takes any float, so a non-finite score can sit in a tree
+    in memory; the write is the last point at which it can be stopped, and it
+    must stop before a file exists.
+    """
+    tree = DiscoveryTree.with_root()
+    tree.add_child(tree.root_id, score=score)
+    path = tmp_path / "tree.json"
+
+    with pytest.raises(TreeInvariantError, match="JSON"):
+        tree.save(path)
+    assert not path.exists()
