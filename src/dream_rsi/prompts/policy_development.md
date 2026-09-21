@@ -116,8 +116,9 @@ you are revising does unless its source says otherwise.
 * A batch holds ids that were legal before the call, at most `width` of them, and
   no duplicates other than repeated selections of the root.
 * Import nothing but the standard library and `dream_rsi`. Your module runs in a
-  sandbox that refuses the network, subprocesses, and writes outside its own
-  scratch directory, and that caps its CPU, memory and wall clock: a version that
+  sandbox that refuses the network, subprocesses, writes outside its own scratch
+  directory, and reads outside that scratch directory, `dream_rsi` and the Python
+  installation, and that caps its CPU, memory and wall clock: a version that
   oversteps scores nothing at all.
 
 ## The version you are revising

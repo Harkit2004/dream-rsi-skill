@@ -63,6 +63,21 @@ class OptimalPolicy(GreedyBestFirstPolicy):
     pass
 """
 
+# The same baseline plus a package import the child has not already made:
+# ``_sandbox_child`` loads ``dream_rsi.policy`` and ``dream_rsi.tree`` itself, so
+# reaching either finds it in ``sys.modules`` and reads no file at all. The read
+# rule issue #39 adds has to cover the package directory, not only the modules
+# that happen to be loaded, or a policy importing a sibling module is recorded as
+# scoring nothing.
+IMPORTING_SOURCE = """
+import dream_rsi.scoring
+from dream_rsi.policy import GreedyBestFirstPolicy
+
+
+class OptimalPolicy(GreedyBestFirstPolicy):
+    pass
+"""
+
 
 # A candidate that plans its own grid (issue #21): §B.2's optional ``plan_grid``,
 # written the way the development agent is told to write it.
@@ -120,7 +135,10 @@ def _failure(source: str, *, scratch_root: Path | None = None) -> str:
 
 
 @pytest.mark.parametrize("name", NAMES)
-def test_a_sandboxed_baseline_replays_exactly_as_it_does_in_process(name: str) -> None:
+@pytest.mark.parametrize("source", [BASELINE_SOURCE, IMPORTING_SOURCE])
+def test_a_sandboxed_baseline_replays_exactly_as_it_does_in_process(
+    name: str, source: str
+) -> None:
     """The sandbox costs a correct policy nothing — not even a different tie-break.
 
     §3 compares versions by their replay scores, so a sandboxed candidate whose
@@ -131,11 +149,15 @@ def test_a_sandboxed_baseline_replays_exactly_as_it_does_in_process(name: str) -
     match. The baseline is the greedy one because it decides *from* the revealed
     scores: dropping them, or dropping ``W``, changes its trajectory on all three
     fixtures, where the breadth-first baseline would notice neither.
+
+    Run for both sources: the plain baseline, and one that imports a package
+    module the child has not loaded, which is the read allowlist's package root
+    being exercised rather than the modules already in ``sys.modules``.
     """
     world = _world(name)
     config = DreamConfig(width=2)
 
-    with SandboxedPolicy(BASELINE_SOURCE, config={"beta": 1.0}, limits=TEST_LIMITS) as policy:
+    with SandboxedPolicy(source, config={"beta": 1.0}, limits=TEST_LIMITS) as policy:
         sandboxed = world.simulator.replay(
             policy, width=config.width, seed=config.seed
         ).result()
@@ -304,17 +326,42 @@ def test_a_write_outside_the_scratch_directory_is_refused(tmp_path: Path) -> Non
     assert not escape.exists(), "the sandbox let a policy write outside its scratch directory"
 
 
+def test_a_candidate_cannot_read_a_recorded_tree_off_disk() -> None:
+    """Prefix-observability is a property of the filesystem, not just the protocol.
+
+    ``ReplaySimulator`` hands a policy the revealed prefix, but the recorded
+    worlds stay on disk at fixed paths — a real simulator pool (issue #17) keeps
+    a corpus of them there — so a candidate that opens one reads the ``s_v`` of
+    nodes it never revealed. That is what §3/§B.2 forbid: "Never use unrevealed
+    scores, a true optimum, hardcoded winning cell ids". A read rule tight
+    enough to refuse this, and a candidate that only imports and decides still
+    replaying byte for byte (the baseline test above), are the two sides issue
+    #39 asks to be held together.
+    """
+    tree_path = TREES / "wide_shallow" / "tree.json"
+    error = _failure(_policy_source(f"open({str(tree_path)!r}, 'rb').read()"))
+
+    assert "may not read" in error, error
+    assert str(tree_path) in error, error
+
+
 def test_the_scratch_directory_is_writable_and_goes_away_afterwards(tmp_path: Path) -> None:
     """Restricted is not the same as read-only: the scratch directory is usable.
 
     A policy may keep notes between its rounds, and the paper's own skeleton
     carries per-rollout state. Catches a filesystem rule that refuses
-    everything, which would pass every other test here.
+    everything, which would pass every other test here — and a read rule that
+    forgets the scratch directory, which a policy reading its own notes back
+    would hit.
     """
     source = _policy_source(
         """
         with open('notes.txt', 'a') as handle:
             handle.write('one round\\n')
+        with open('notes.txt') as handle:
+            note = handle.read()
+        if note != 'one round\\n':
+            raise AssertionError(f'read back {note!r} from the scratch directory')
         """
     )
     with SandboxedPolicy(source, limits=TEST_LIMITS, scratch_root=tmp_path) as policy:
