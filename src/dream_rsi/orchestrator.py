@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 from collections import Counter
 from collections.abc import Sequence
@@ -211,11 +212,12 @@ class ExplorationPolicy(Protocol):
     policy-development agent writes against — ``solve`` and the observation
     signals — is issue #10, and the online loop calls none of it.
 
-    One more method it does call where a policy defines it:
+    Two more methods it calls only where a policy defines them, both looked up
+    rather than declared, because a protocol that required either would be one
+    the baselines below do not satisfy: ``reset(rng: random.Random) -> None``,
+    §3's per-rollout state reset, called once before the first decision; and
     ``plan_grid(context: GridPlanningContext) -> GridPlan``, §B.2's grid plan
-    (issue #21), asked for once before the rollout opens anything. It is not
-    declared here because it is optional — a protocol that required it would be
-    one the baselines do not satisfy — so :func:`_plan` looks for it instead.
+    (issue #21), asked for once before the rollout opens anything.
     """
 
     def select(
@@ -269,11 +271,26 @@ def run_rollout(
     ``workspace`` itself, which is only sound for a task whose agent and
     evaluator touch no files (the toy task in this repo is one).
 
+    ``policy`` is reset once before the first decision — §3: both phases use the
+    same decision interface, and replay "resets the policy's per-rollout state"
+    before each policy-world pair — by calling its ``reset(rng)`` if it defines
+    one, with a generator seeded from ``config.seed`` and used by nothing else.
+    So one instance drives a second rollout exactly as a fresh one would, and a
+    policy that samples is reproducible (issue #36).
+
     ``agent`` and ``evaluator`` are called from up to ``config.workers`` threads
     at once, so an adapter that keeps state has to tolerate that. The two shipped
     in this repo are stateless.
     """
     config = config or RolloutConfig()
+    # Looked up rather than required: a bare ``ExplorationPolicy`` with no
+    # ``reset`` — the fixture recorder's is one — is still driveable. Done before
+    # :func:`_plan`, so a reused instance plans and decides from the same state a
+    # fresh one would, and seeded from the config so a policy that samples is
+    # reproducible (working rule 5).
+    reset = getattr(policy, "reset", None)
+    if callable(reset):
+        reset(random.Random(config.seed))
     # Before the grid exists, and once: §B.2's plan_grid "runs **before** a new
     # live grid is created" and "must never inspect a current episode's
     # outcomes", which a hook called per round could.
