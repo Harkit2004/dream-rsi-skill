@@ -527,7 +527,7 @@ def test_a_planning_candidate_and_a_plain_one_score_in_the_same_sweep() -> None:
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("wall_seconds", 0.0), ("cpu_seconds", 0), ("memory_bytes", 0)],
+    [("wall_seconds", 0.0), ("cpu_seconds", 0), ("memory_bytes", 0), ("disk_bytes", 0)],
 )
 def test_limits_cannot_be_turned_off(field: str, value: float) -> None:
     """There is no bypass (issue #13, done-when; CLAUDE.md).
