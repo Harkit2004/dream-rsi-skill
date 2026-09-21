@@ -29,7 +29,9 @@ process.
 policy it selected into its own directory, and a record last of all, by rename.
 So the record existing means the cycle finished, a run resumes by reading the
 records it finds, and a cycle interrupted half-way is redone from the top rather
-than patched up. That is what makes a crash in cycle 5 cost cycle 5.
+than patched up. That is what makes a crash in cycle 5 cost cycle 5. What the
+records cannot say is what they were produced under, so a manifest written
+before the first cycle says it and a resume is held to it (issue #45).
 
 **The cost report is the driver's.** Each half of a cycle counts what it spent
 where it spends it — agent calls in the rollout, model calls and revealed nodes
@@ -57,8 +59,8 @@ import json
 import os
 import shutil
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, field, replace
 from itertools import accumulate
 from pathlib import Path
 from typing import Any
@@ -85,6 +87,7 @@ __all__ = [
     "CYCLES_DIRNAME",
     "CYCLE_TEMPLATE",
     "DEFAULT_POLICY_SOURCE",
+    "MANIFEST_FILENAME",
     "NEXT_POLICY_FILENAME",
     "POLICY_FILENAME",
     "POOL_DIRNAME",
@@ -95,6 +98,7 @@ __all__ = [
     "Run",
     "RunConfig",
     "RunError",
+    "RunManifest",
     "main",
     "run_cycles",
 ]
@@ -104,6 +108,11 @@ CYCLE_TEMPLATE = "cycle_{:03d}"
 
 # Where the run keeps ℋ: one tree per finished cycle, under the cycle's name.
 POOL_DIRNAME = "pool"
+
+# What the cycles under this directory were produced under, written before the
+# first of them runs. Beside ``cycles/`` and ``pool/`` rather than inside either:
+# it is a property of the whole run, not of one cycle or one tree.
+MANIFEST_FILENAME = "manifest.json"
 
 # What one cycle leaves behind, beside the tree and round log
 # ``orchestrator.Rollout.save`` writes. ``RECORD_FILENAME`` is written last and
@@ -171,7 +180,7 @@ TOY_REVISIONS = tuple(
 
 
 class RunError(ValueError):
-    """A run directory holds something this driver cannot read back."""
+    """A run directory holds something this driver cannot read back, or carry on from."""
 
 
 @dataclass(frozen=True)
@@ -206,6 +215,103 @@ class RunConfig:
             raise ValueError(f"a cycle needs at least one policy version, got {self.versions}")
         if self.attempts < 1:
             raise ValueError(f"a revision needs at least one attempt, got {self.attempts}")
+
+
+@dataclass(frozen=True)
+class RunManifest:
+    """What the cycles under one run directory were produced under (issue #45).
+
+    A run directory is one history, and §3's ``V^m`` is an average over it, so
+    every cycle appended to the directory has to have been produced under the
+    same experiment. This is that experiment: the starting policy ``π_1``, the
+    ``problem``, the online ``rollout`` conditions, the ``dreaming`` conditions a
+    version is scored under, the ``versions`` (``M``) and ``attempts`` a cycle
+    develops, and the sandbox ``limits`` every policy runs behind.
+
+    Which of those have to match was the decision this class exists to record.
+    Three deliberately do not:
+
+    * ``RolloutConfig.workers`` and ``DreamConfig.workers`` — how many things a
+      machine runs at once. The first "changes how long a rollout takes and
+      nothing about the tree it records" (:mod:`dream_rsi.orchestrator`), and
+      the second is documented as unable to move a reported number
+      (:class:`~dream_rsi.dream.DreamConfig`). Neither can make two cycles
+      incomparable, so neither is written to the manifest.
+    * ``RunConfig.cycles`` — how many cycles *this session* was asked for.
+      Resuming a two-cycle run with three is how a run continues, not a
+      different experiment.
+    * ``PoolConfig`` — how much of the history one offline phase may replay. What
+      a cycle actually dreamed over is on its own record, and the limit is a
+      budget for one cycle rather than part of the run's identity.
+
+    Everything else has to match. A resumed run whose configuration differs is
+    refused with a :class:`RunError` naming the fields, rather than appended to
+    a history it does not match.
+    """
+
+    problem: str
+    policy: str
+    rollout: RolloutConfig
+    dreaming: DreamConfig
+    versions: int
+    attempts: int
+    limits: SandboxLimits
+
+    @classmethod
+    def from_config(cls, config: RunConfig, *, policy: str, problem: str) -> RunManifest:
+        """The manifest of a run about to start, from what the run was handed."""
+        return cls(
+            problem=problem,
+            policy=policy,
+            rollout=config.rollout,
+            dreaming=config.dreaming,
+            versions=config.versions,
+            attempts=config.attempts,
+            limits=config.limits,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """The manifest as it is stored: the fields that have to match, and no others.
+
+        Neither worker count is written — a resume under a different one is the
+        same run — and a file holding a field it does not compare would read as
+        though it did.
+        """
+        return {
+            "problem": self.problem,
+            "policy": self.policy,
+            "rollout": _without_workers(self.rollout),
+            "dreaming": _without_workers(self.dreaming),
+            "versions": self.versions,
+            "attempts": self.attempts,
+            "limits": asdict(self.limits),
+        }
+
+    def differences(self, recorded: Mapping[str, Any]) -> tuple[str, ...]:
+        """The fields on which a stored manifest disagrees with this one.
+
+        Dotted paths, because a changed ``width`` and a changed ``seed`` are
+        different refusals: the caller reads which of the two it handed over.
+        """
+        return tuple(_differences(self.to_dict(), recorded, ""))
+
+
+def _without_workers(config: RolloutConfig | DreamConfig) -> dict[str, Any]:
+    """A config as stored: everything but the worker count it need not match on."""
+    payload = asdict(config)
+    del payload["workers"]
+    return payload
+
+
+def _differences(expected: Any, actual: Any, path: str) -> list[str]:
+    """Every dotted path at which two manifest-shaped payloads disagree."""
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        found: list[str] = []
+        for key in sorted(set(expected) | set(actual)):
+            nested = f"{path}.{key}" if path else key
+            found += _differences(expected.get(key), actual.get(key), nested)
+        return found
+    return [] if expected == actual else [path]
 
 
 @dataclass(frozen=True)
@@ -497,7 +603,10 @@ def run_cycles(
     whose records are there are read back rather than redone, and the first one
     without a record is run from the top. Nothing else distinguishes a resumed
     run — there is no flag, so a crashed run is restarted with the command that
-    started it.
+    started it. A resume is held to the manifest written before the first cycle
+    (:class:`RunManifest`), so handing the same directory a different policy,
+    problem or configuration raises rather than appending to a history produced
+    under another run.
 
     A policy that fails online — it oversteps its limits, or answers with
     something that is not a batch — raises out of the cycle it was deployed in
@@ -506,9 +615,16 @@ def run_cycles(
     every later cycle exploring under a policy nobody chose.
     """
     config = RunConfig() if config is None else config
-    cycles = Path(directory) / CYCLES_DIRNAME
+    directory = Path(directory)
+    cycles = directory / CYCLES_DIRNAME
     cycles.mkdir(parents=True, exist_ok=True)
-    pool = SimulatorPool(Path(directory) / POOL_DIRNAME)
+    pool = SimulatorPool(directory / POOL_DIRNAME)
+
+    _check_manifest(
+        directory / MANIFEST_FILENAME,
+        RunManifest.from_config(config, policy=policy, problem=problem),
+        cycles,
+    )
 
     records, deployed, source = _resume(cycles, config.cycles, policy, pool)
     history = [record.world for record in records]
@@ -536,6 +652,42 @@ def run_cycles(
         pool=pool.names(),
         stats=pool.stats(),
     )
+
+
+def _check_manifest(path: Path, manifest: RunManifest, cycles: Path) -> None:
+    """Hold a resumed run to what its cycles were produced under (issue #45).
+
+    Called before any cycle is accepted. A directory with no finished cycle has
+    no history to mismatch — a run whose first cycle never finished is still a
+    run about to start — so the manifest there is this run's to write. Once a
+    cycle has finished, the manifest is the directory's: a run resumed under
+    another configuration is refused rather than appended to, and so is a
+    directory whose cycles have no manifest at all, since nothing can then say
+    whether the two match.
+    """
+    if not _finished(cycles):
+        _write(path, json.dumps(manifest.to_dict(), indent=2, sort_keys=True) + "\n")
+        return
+    if not path.is_file():
+        raise RunError(
+            f"{cycles} holds finished cycles but {path} is missing: nothing says "
+            "what they were produced under, so this run cannot continue them"
+        )
+    recorded = _read_manifest(path)
+    if recorded != manifest.to_dict():
+        names = manifest.differences(recorded)
+        raise RunError(f"{path} does not match this run: {', '.join(names)}")
+
+
+def _read_manifest(path: Path) -> dict[str, Any]:
+    """A stored manifest, as a payload the current one can be compared with."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RunError(f"{path} is not a readable run manifest: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RunError(f"{path} is not a readable run manifest: expected a JSON object")
+    return payload
 
 
 def _resume(

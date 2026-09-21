@@ -36,12 +36,14 @@ from dream_rsi.pool import PoolConfig
 from dream_rsi.run import (
     CYCLE_TEMPLATE,
     CYCLES_DIRNAME,
+    MANIFEST_FILENAME,
     POLICY_FILENAME,
     POOL_DIRNAME,
     RECORD_FILENAME,
     TIMING_FILENAME,
     Run,
     RunConfig,
+    RunError,
     run_cycles,
 )
 from dream_rsi.sandbox import SandboxError, SandboxLimits
@@ -109,6 +111,28 @@ class OptimalPolicy(BreadthFirstPolicy):
 """
 
 
+def _escape_source(escape: Path) -> str:
+    """A policy that writes outside its sandbox, which the boundary refuses.
+
+    Where a test needs a cycle to fail for a reason that is not the run's
+    configuration, this is the deterministic way: the sandbox refuses the write
+    and the cycle raises with it, leaving whatever the driver wrote before the
+    cycle behind.
+    """
+    return (
+        "from pathlib import Path\n"
+        "\n"
+        "\n"
+        "class OptimalPolicy:\n"
+        "    def __init__(self, config=None):\n"
+        "        self.config = dict(config or {})\n"
+        "\n"
+        "    def select(self, tree, eligible, width):\n"
+        f"        Path({str(escape)!r}).write_text('escaped')\n"
+        "        return (tree.root_id,)\n"
+    )
+
+
 @dataclass
 class ScriptedDeveloper:
     """A development agent that answers from a list and keeps what it was asked.
@@ -136,6 +160,8 @@ def _run(
     pool: PoolConfig | None = None,
     workers: int = 2,
     rounds: int = 4,
+    seed: int = 0,
+    dreaming: DreamConfig | None = None,
 ) -> Run:
     """A toy run in ``directory``: two versions a cycle, over the toy landscape."""
     return run_cycles(
@@ -147,8 +173,8 @@ def _run(
         directory=directory,
         config=RunConfig(
             cycles=cycles,
-            rollout=RolloutConfig(workers=workers, max_rounds=rounds, max_nodes=16, seed=0),
-            dreaming=DreamConfig(width=workers),
+            rollout=RolloutConfig(workers=workers, max_rounds=rounds, max_nodes=16, seed=seed),
+            dreaming=DreamConfig(width=workers) if dreaming is None else dreaming,
             # Two: the incumbent and one revision, which is the smallest round
             # that can select anything other than what it started with.
             versions=2,
@@ -270,6 +296,87 @@ def test_a_run_resumed_after_a_crash_keeps_the_cycles_it_finished(tmp_path: Path
     assert _trees(resumed_dir) == _trees(tmp_path / "whole")
 
 
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        pytest.param({"seed": 1}, "rollout.seed", id="rollout-seed"),
+        pytest.param({"policy": THRIFTY_SOURCE}, "policy", id="policy"),
+        pytest.param({"dreaming": DreamConfig(width=1)}, "dreaming.width", id="replay-width"),
+    ],
+)
+def test_a_resume_under_a_changed_configuration_is_refused(
+    tmp_path: Path, change: dict[str, object], named: str
+) -> None:
+    """Issue #45's first "tests first": a history is one experiment or it is not.
+
+    A cycle's tree is what a later cycle's ``V^m`` averages over, so the cycles
+    under one directory have to have been produced under the same run: the same
+    starting policy, the same problem, the same online conditions and the same
+    replay conditions. The manifest written before the first cycle says which,
+    and a resume handed something else is refused rather than appended to it —
+    naming the field, so a caller can tell a changed seed from a changed policy
+    without reading the manifest themselves.
+    """
+    _run(tmp_path, ScriptedDeveloper(), cycles=1)
+
+    with pytest.raises(RunError, match=named):
+        _run(tmp_path, ScriptedDeveloper(), cycles=1, **change)
+
+
+def test_a_resume_under_a_different_worker_count_still_resumes(tmp_path: Path) -> None:
+    """Issue #45's third "tests first": the machine's parallelism is not the run.
+
+    ``RolloutConfig.workers`` changes how long a rollout takes and nothing about
+    the tree it records, and ``DreamConfig.workers`` how many ``(version, world)``
+    cells replay at once, which :class:`~dream_rsi.dream.DreamConfig` documents as
+    unable to move a reported number. Both are properties of the machine a
+    session happens to run on, so a manifest that compared them would refuse a
+    resume that changes nothing about the history. The width, which does change
+    it, is held fixed here.
+    """
+    _run(tmp_path, ScriptedDeveloper(), cycles=2, workers=1, dreaming=DreamConfig(width=1))
+
+    resumed = _run(
+        tmp_path, ScriptedDeveloper(), cycles=2, workers=4, dreaming=DreamConfig(width=1, workers=4)
+    )
+
+    assert len(resumed.cycles) == 2
+
+
+def test_the_manifest_is_written_before_the_first_cycle(tmp_path: Path) -> None:
+    """Issue #45's "persist a run manifest before the first cycle".
+
+    The manifest is what vouches for the cycles under the directory, so it has
+    to be there before there is a cycle to vouch for: an implementation that
+    wrote it after cycle 0 completed would leave a run that crashed in its first
+    cycle with no manifest at all. The failed cycle here is a policy the sandbox
+    refuses, so nothing was recorded and the manifest is all the run left.
+    """
+    source = _escape_source(tmp_path / "escaped.txt")
+
+    with pytest.raises(SandboxError):
+        _run(tmp_path / "run", ScriptedDeveloper(), cycles=1, policy=source)
+
+    manifest = json.loads((tmp_path / "run" / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert manifest["policy"] == source
+    assert manifest["problem"] == PROBLEM
+
+
+def test_a_run_directory_without_a_manifest_is_not_resumed(tmp_path: Path) -> None:
+    """A finished cycle nothing vouches for is not accepted.
+
+    The records say which cycles this run has; the manifest says what they were
+    produced under. A directory that has one and not the other cannot be checked
+    against the configuration it is being resumed with, and accepting the cycles
+    anyway is the mixing issue #45 exists to prevent.
+    """
+    _run(tmp_path, ScriptedDeveloper(), cycles=1)
+    (tmp_path / MANIFEST_FILENAME).unlink()
+
+    with pytest.raises(RunError, match="manifest"):
+        _run(tmp_path, ScriptedDeveloper(), cycles=1)
+
+
 def test_two_runs_under_the_same_seed_record_the_same_cycles(tmp_path: Path) -> None:
     """End-to-end determinism (AGENTS.md rule 5), across two directories.
 
@@ -296,18 +403,7 @@ def test_the_deployed_policy_is_sandboxed_online_too(tmp_path: Path) -> None:
     file never appears.
     """
     escape = tmp_path / "escaped.txt"
-    source = (
-        "from pathlib import Path\n"
-        "\n"
-        "\n"
-        "class OptimalPolicy:\n"
-        "    def __init__(self, config=None):\n"
-        "        self.config = dict(config or {})\n"
-        "\n"
-        "    def select(self, tree, eligible, width):\n"
-        f"        Path({str(escape)!r}).write_text('escaped')\n"
-        "        return (tree.root_id,)\n"
-    )
+    source = _escape_source(escape)
 
     with pytest.raises(SandboxError):
         _run(tmp_path / "run", ScriptedDeveloper(), cycles=1, policy=source)
