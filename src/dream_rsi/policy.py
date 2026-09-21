@@ -177,13 +177,13 @@ class OptimalPolicy(ABC):
     ``solve`` loop — is here, because all three baselines need it and a
     model-written version should not have to reinvent it to be legal.
 
-    A policy carries state only for the length of one rollout (§3: replay
-    "resets the policy's per-rollout state" before each policy-world pair).
-    Replay calls :meth:`reset` before the first decision, and :meth:`select`
-    resets itself when what it is shown is a rollout starting, so one instance
-    can drive a second rollout either way. A caller holding a seed still calls
-    :meth:`reset` with it, because a self-reset has no seed to pass on — which
-    is why the online driver should own this too (issue #36).
+    A policy carries state only for the length of one rollout (§3: both phases
+    use the same decision interface, and each "resets the policy's per-rollout
+    state" before its policy-world pair). Both drivers call :meth:`reset` once
+    before the first decision — ``replay.ReplaySimulator.replay`` and
+    ``orchestrator.run_rollout`` alike — with a generator seeded from the run's
+    seed, so a policy that samples is reproducible and one instance drives a
+    second rollout exactly as a fresh one would.
 
     One method a subclass may add is deliberately absent here:
     ``plan_grid(self, context: GridPlanningContext) -> GridPlan``, §B.2's
@@ -205,8 +205,9 @@ class OptimalPolicy(ABC):
     def reset(self, rng: random.Random | None = None) -> None:
         """Forget one rollout's state before starting another (§3).
 
-        ``rng`` is the generator replay seeds from the run's seed and hands to a
-        policy that declares this method. The baselines here ignore it — §B.2:
+        ``rng`` is the generator the run's driver seeds from its own seed and
+        hands over — replay's ``seed`` and the online rollout's
+        ``RolloutConfig.seed`` alike. The baselines here ignore it — §B.2:
         "Never sample randomly" — and keeping the parameter is what lets a
         model-written version that does sample stay reproducible instead of
         reaching for the global stream.
@@ -235,10 +236,11 @@ class OptimalPolicy(ABC):
         if len(tree) == 1 and (self._selected or self._closed):
             # A tree holding only the root is a rollout starting (§3's
             # ``T^{m,0} = {r}``), so anything still held belongs to one that has
-            # finished. Replay resets us itself; the online driver does not
-            # (issue #36), and carrying a closure across would read the root as
-            # a frontier the world refused, filter out the only legal action,
-            # and end that rollout without a single attempt.
+            # finished. Both drivers reset us before the first decision
+            # (issue #36); this guards a caller stepping :meth:`select` by hand,
+            # which would otherwise read the root as a frontier the world
+            # refused, filter out the only legal action, and end that rollout
+            # without a single attempt.
             self.reset()
         counts = _child_counts(tree)
         self._close_barren(counts)

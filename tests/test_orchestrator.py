@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 import time
@@ -17,6 +18,7 @@ from dream_rsi.adapters.evaluator import EvalResult, ScoreDirection
 from dream_rsi.adapters.fake_agent import FakeAgent
 from dream_rsi.adapters.toy_evaluator import ToyEvaluator
 from dream_rsi.orchestrator import (
+    FirstEligiblePolicy,
     RolloutConfig,
     eligible_nodes,
     main,
@@ -49,6 +51,25 @@ class ScriptedPolicy:
         picks = self.script[self._round]
         self._round += 1
         return tuple(eligible[position] for position in picks)
+
+
+@dataclass
+class SamplingPolicy:
+    """Selects one random eligible node per round, from the driver's generator.
+
+    Randomness comes only from the generator the driver hands ``reset``: one
+    that never gets it leaves ``_rng`` as ``None`` and fails loudly rather than
+    quietly sampling from the global stream (working rule 5).
+    """
+
+    _rng: random.Random | None = field(default=None, init=False)
+
+    def reset(self, rng: random.Random) -> None:
+        self._rng = rng
+
+    def select(self, tree: DiscoveryTree, eligible: tuple[str, ...], width: int) -> tuple[str, ...]:
+        assert self._rng is not None, "run_rollout never handed the policy a seeded generator"
+        return (self._rng.choice(eligible),)
 
 
 @dataclass
@@ -472,6 +493,34 @@ def test_the_rollout_is_reproducible(tmp_path):
     # they are separate branches, not a duplicate record.
     opened = [node.artifact for node in first.tree.children(first.tree.root_id)]
     assert len(set(opened)) > 1
+
+
+def test_one_policy_instance_records_what_a_fresh_instance_records(tmp_path):
+    """§3's per-rollout reset belongs to the driver (issue #36).
+
+    The online rollout resets the policy it is handed, seeded from
+    ``RolloutConfig.seed`` — so a reused instance decides from the same state
+    and the same generator a fresh one would, instead of continuing the last
+    rollout. A policy that samples is the one that shows it: replay already
+    hands its policies a seeded generator, and this driver does the same.
+    """
+    reused = SamplingPolicy()
+    rollout(reused, tmp_path, max_rounds=3, seed=7)
+    second = rollout(reused, tmp_path, max_rounds=3, seed=7)
+    fresh = rollout(SamplingPolicy(), tmp_path, max_rounds=3, seed=7)
+
+    assert len(attempts(second)) == 3
+    assert second.tree == fresh.tree
+
+
+def test_a_policy_with_no_reset_method_still_drives_a_rollout(tmp_path):
+    # The reset is looked up, not required: the fixture recorder's policy defines
+    # none, and a protocol that demanded one would be one the baselines fail.
+    result = rollout(FirstEligiblePolicy(), tmp_path, workers=2, max_rounds=2, max_nodes=None)
+
+    # Round 0 selects the root alone (A(T) is just the root), round 1 selects it
+    # and the leaf that opened.
+    assert len(attempts(result)) == 3
 
 
 def test_the_saved_rollout_reloads_as_a_tree_beside_its_round_log(tmp_path):

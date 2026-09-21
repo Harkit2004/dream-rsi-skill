@@ -237,14 +237,13 @@ def test_a_recorded_rollout_replays_to_the_trajectory_that_recorded_it(
 def test_one_instance_can_drive_a_second_rollout(tmp_path: Path) -> None:
     """A policy that has already run a rollout starts the next one from nothing.
 
-    §3 resets a policy's per-rollout state before each policy-world pair.
-    Replay does that itself; the online driver does not (#36), so a caller who
-    reuses an instance — the natural thing to write in a loop that runs a
-    rollout per cycle — would have the first rollout's selections read against
-    the second one's tree. The root, which selected fine last time and has no
-    children in the new tree, looks like a frontier the world refused: it is
-    filtered out, the only legal action with it, and the rollout records
-    nothing at all.
+    §3 resets a policy's per-rollout state before each policy-world pair, and
+    the online driver does that itself (#36), so an instance reused across
+    rollouts records what a fresh one would. What it guards against is the
+    failure without that: the first rollout's selections read against the second
+    one's tree. The root, which selected fine last time and has no children in
+    the new tree, looks like a frontier the world refused: it is filtered out,
+    the only legal action with it, and the rollout records nothing at all.
     """
 
     def rollout(policy: OptimalPolicy, name: str):
