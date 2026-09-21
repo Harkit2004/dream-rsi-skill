@@ -12,3 +12,4 @@ runs/
 trees/
 !tests/fixtures/trees/
 graphify-out/
+notes.txt
