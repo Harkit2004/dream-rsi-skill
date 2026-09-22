@@ -527,10 +527,11 @@ def _check_batch(batch: Sequence[str], eligible: Sequence[str], root_id: str) ->
     counts = Counter(node_id for node_id in batch if node_id != root_id)
     repeated = sorted(node_id for node_id, count in counts.items() if count > 1)
     if repeated:
-        # Refused here and nowhere else: replay has nothing to refuse, because
-        # the second selection of a leaf retrieves the empty set §3 already
-        # defines for it. Only the online transition, which creates a child per
-        # selection, can record something reveal cannot reach.
+        # Refused here and in replay's ``ReplayRun._check``, in these words
+        # (issue #56): one decision interface, one answer to what a legal
+        # batch is. Refusing it at all is what keeps a recorded tree
+        # replayable (issue #31) — a second child under a non-root node is
+        # one §3's reveal rule has no answer for.
         raise ValueError(
             f"policy selected node(s) twice in one batch: {', '.join(repeated)}; "
             f"only the root may repeat, and each of its repeats opens a branch"

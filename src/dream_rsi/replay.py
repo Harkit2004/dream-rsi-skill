@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import math
 import random
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -210,12 +211,10 @@ class ReplayPolicy(Protocol):
         observations and scores of everything revealed so far and nothing else.
         ``eligible`` is ``A(T^{m,k})``, the root followed by the revealed
         leaves; ``width`` is ``W``. A batch is retrieved in order, so repeating
-        a node walks the unrevealed children the recording holds under it: two
-        selections of the root open two branches, as online. Repeating any
-        other node is a batch the online rollout refuses outright (see
-        ``orchestrator._check_batch``), so a policy should not issue one; over
-        a tree this repo recorded it gains nothing anyway, since a non-root
-        node there has at most one recorded child.
+        the root opens that many branches, as online. Repeating any other node
+        is refused here exactly as the online rollout refuses it (see
+        ``orchestrator._check_batch`` and ``ReplayRun._check``): one decision
+        interface, one answer to what a legal batch is (issue #56).
         """
         ...
 
@@ -605,15 +604,15 @@ class ReplayRun:
     def reveal(self, batch: Sequence[str]) -> ReplayRound:
         """Take one decision round: reveal what ``batch`` retrieves from the world.
 
-        Eligibility is checked once, against ``A(T^{m,k})`` as the round began,
-        and the batch is then retrieved in order — so repeating a node walks
-        the unrevealed children the recording holds under it: two selections of
-        the root open two of its branches, and two of a leaf reveal a second
-        recorded child where one exists, which a rollout of ours never records
-        (see ``orchestrator._check_batch``). An empty batch is the policy's
-        stop action and is not a round — passing one here is rejected rather
-        than logged, because an empty round would inflate Equation 1's
-        ``k^{m,★}`` with a decision that revealed nothing.
+        Eligibility and the duplicate rule are checked once, against
+        ``A(T^{m,k})`` as the round began: the root may repeat — two
+        selections of it open two of its branches, as online — and every other
+        node may appear at most once, a batch both drivers refuse in the same
+        words (see ``orchestrator._check_batch`` and issue #56). The batch is
+        then retrieved in order. An empty batch is the policy's stop action and
+        is not a round — passing one here is rejected rather than logged,
+        because an empty round would inflate Equation 1's ``k^{m,★}`` with a
+        decision that revealed nothing.
         """
         batch = tuple(batch)
         if not batch:
@@ -675,13 +674,29 @@ class ReplayRun:
         )
 
     def _check(self, batch: Sequence[str], eligible: Sequence[str]) -> None:
-        """Reject anything outside ``A(T^{m,k})`` — the prefix-observability rule."""
+        """Reject anything outside ``A(T)`` — the prefix-observability rule.
+
+        Also refuses a batch naming a non-root node twice, in the words
+        ``orchestrator._check_batch`` speaks (issue #56). §3 puts both phases
+        on one decision interface, so the drivers cannot disagree about what a
+        legal action is: a policy that duplicates a leaf must fail here, where
+        it is being judged, and not only once it is deployed online and takes
+        the rollout down. The root is exempt — a repeat of it opens a further
+        branch, which is how one round reaches full width.
+        """
         allowed = set(eligible)
         outside = [node_id for node_id in batch if node_id not in allowed]
         if outside:
             raise ValueError(
                 f"policy selected node(s) outside A(T): {', '.join(sorted(set(outside)))}; "
                 f"eligible are {', '.join(eligible)}"
+            )
+        counts = Counter(node_id for node_id in batch if node_id != self._world.root_id)
+        repeated = sorted(node_id for node_id, count in counts.items() if count > 1)
+        if repeated:
+            raise ValueError(
+                f"policy selected node(s) twice in one batch: {', '.join(repeated)}; "
+                f"only the root may repeat, and each of its repeats opens a branch"
             )
 
     def _next_child(self, node_id: str, revealed: set[str]) -> str | None:
@@ -694,12 +709,11 @@ class ReplayRun:
         generalises without contradicting the paper — the two rules coincide
         wherever a node has at most one child — and a rollout of ours records
         nothing else, since only the root may be selected twice in a batch (see
-        ``orchestrator._check_batch``, and issue #31). Where a tree recorded
-        elsewhere does branch off a non-root node, its extra children are
-        reachable only from the batch that first reveals that node, which walks
-        them by naming it again: once a round ends, the node is no longer a
-        leaf and has left ``A(T)`` for good, so whatever it still holds can
-        never be revealed.
+        ``orchestrator._check_batch``, ``ReplayRun._check``, and issue #31). A
+        tree recorded elsewhere that does branch off a non-root node therefore
+        reveals at most one child there: the second selection that would walk
+        the rest is a batch both phases refuse (issue #56), and once the round
+        ends the node is no longer a leaf and has left ``A(T)`` for good.
         Revisit if the authors' implementation lands (see references/method.md).
         """
         for child in self._world._recorded_children(node_id):
