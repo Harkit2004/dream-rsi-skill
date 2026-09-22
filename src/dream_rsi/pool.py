@@ -169,7 +169,7 @@ class SimulatorPool:
         tree when that cycle is redone.
         """
         path = self._path(name)
-        self._directory.mkdir(parents=True, exist_ok=True)
+        durable.mkdir(self._directory)
         staging = path.with_name(path.name + STAGING_SUFFIX)
         tree.save(staging)
         try:

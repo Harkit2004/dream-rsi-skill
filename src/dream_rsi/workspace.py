@@ -107,7 +107,7 @@ class SnapshotStore:
         if (snapshots / ref).is_dir():
             return ref
 
-        snapshots.mkdir(parents=True, exist_ok=True)
+        durable.mkdir(snapshots)
         # Copied aside and renamed into place, so a reader never sees a
         # half-written snapshot under a ref that promises the whole state — and
         # flushed on the way (`durable`), so the ref survives a power loss with

@@ -198,7 +198,7 @@ class Rollout:
         power loss as much as after a crash of this process.
         """
         target = Path(directory)
-        target.mkdir(parents=True, exist_ok=True)
+        durable.mkdir(target)
         self.tree.save(target / TREE_FILENAME)
         payload = {
             "stop_reason": self.stop_reason,

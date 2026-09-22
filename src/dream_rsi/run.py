@@ -621,7 +621,7 @@ def run_cycles(
     config = RunConfig() if config is None else config
     directory = Path(directory)
     cycles = directory / CYCLES_DIRNAME
-    cycles.mkdir(parents=True, exist_ok=True)
+    durable.mkdir(cycles)
     pool = SimulatorPool(directory / POOL_DIRNAME)
 
     _check_manifest(
@@ -774,7 +774,7 @@ def _cycle(
     # whose files disagree with each other.
     shutil.rmtree(cycle, ignore_errors=True)
     workspace = cycle / WORKSPACE_DIRNAME
-    workspace.mkdir(parents=True)
+    durable.mkdir(workspace)
     _write(cycle / POLICY_FILENAME, source)
 
     # 1. Deploy π_t online. Behind the sandbox because the source is whatever the

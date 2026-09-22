@@ -158,8 +158,12 @@ def test_publishing_a_tree_does_not_sync_once_per_node(
     separately and flushed each one — would make the pool's cost grow with every
     attempt recorded. Counted rather than clocked: a clock would measure the
     machine, and the contract is that the count does not grow with the tree.
+
+    The pool is warmed first, because the first add also creates the pool
+    directory and flushing that entry is a cost of its own, paid once.
     """
     pool = SimulatorPool(tmp_path / "pool")
+    pool.add("warmup", _tree(0))
     real_fsync = os.fsync
     syncs: list[int] = []
     counts: list[int] = []

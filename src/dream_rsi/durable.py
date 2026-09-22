@@ -10,7 +10,8 @@ is itself a change to the directory holding the name.
 **The decision, stated once.** A published file is durable. :func:`write` flushes
 a file's bytes and then the directory holding it; :func:`publish` renames a
 file whose bytes were flushed and then flushes the directory the name appeared
-in; :func:`copy_tree` is :func:`write` for a whole copied state. So when a name
+in; :func:`mkdir` does the same for the directories a file is put in;
+:func:`copy_tree` is :func:`write` for a whole copied state. So when a name
 appears, its bytes are on the device, and — where the platform can sync a
 directory at all — so is the rename. A cycle publishes in the order its record
 needs: the policy it deployed, the rollout's tree and round log, the tree in the
@@ -39,7 +40,7 @@ import os
 import shutil
 from pathlib import Path
 
-__all__ = ["copy_tree", "publish", "sync_directory", "write"]
+__all__ = ["copy_tree", "mkdir", "publish", "sync_directory", "write"]
 
 
 def write(path: str | Path, text: str) -> None:
@@ -72,17 +73,48 @@ def publish(staging: str | Path, target: str | Path) -> None:
     sync_directory(destination.parent)
 
 
+def mkdir(directory: str | Path) -> None:
+    """Create ``directory``, flushing every entry the creation added.
+
+    ``Path.mkdir(parents=True, exist_ok=True)`` and the syncs a file's flush does
+    not do for it: a directory that was just created is named only in its parent
+    until that parent reaches the device, so every level this creates gets its
+    parent flushed, deepest last. Without it a power loss can take a whole
+    finished cycle's directory out of ``cycles/`` while the files inside it were
+    flushed — the cycle would be redone, which is exactly what the record's
+    durability exists to prevent.
+
+    An existing directory costs nothing, which matters because the hot path —
+    a snapshot per attempt, a workspace per cycle — asks for these over and over.
+    """
+    target = Path(directory)
+    if target.is_dir():
+        return
+    created: list[Path] = []
+    current = target
+    while not current.is_dir():
+        created.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    target.mkdir(parents=True, exist_ok=True)
+    for level in reversed(created):
+        sync_directory(level.parent)
+
+
 def copy_tree(source: str | Path, target: str | Path) -> None:
     """Copy a directory tree, flushing every file and directory entry it writes.
 
     ``shutil.copytree`` with the durability folded into the copy: each file is
     flushed while the copy still has it open for writing, and the directories'
-    entries are flushed afterwards, children first. Metadata is applied after
-    the flush, so a read-only source is copied — and flushed — as the writable
-    file the copy is created as.
+    entries — ``target``'s own included — are flushed afterwards, children
+    first. Metadata is applied before the flush, so what is flushed is the state
+    the digest will name rather than a copy of it that still needs its mode set.
     """
-    shutil.copytree(source, target, symlinks=True, copy_function=_flushed_copy)
-    _sync_directories(Path(target))
+    destination = Path(target)
+    shutil.copytree(source, destination, symlinks=True, copy_function=_flushed_copy)
+    _sync_directories(destination)
+    sync_directory(destination.parent)
 
 
 def sync_directory(directory: str | Path) -> None:
@@ -103,16 +135,19 @@ def sync_directory(directory: str | Path) -> None:
 
 
 def _flushed_copy(source: str, target: str, *, follow_symlinks: bool = True) -> str:
-    """``shutil.copy2`` with the data flushed before the metadata is applied.
+    """``shutil.copy2`` with the finished copy flushed before the handle closes.
 
-    The order is the point: ``copystat`` can make the copy read-only, and a
-    read-only file cannot be opened for the flush this exists to do.
+    The handle is opened writable before ``copystat`` runs, and the flush comes
+    after it: a flush covers the file's metadata as well as its bytes, so it has
+    to see the mode and timestamps the copy is supposed to have — and a
+    read-only copy (which ``copystat`` can make) could not be opened for a flush
+    afterwards.
     """
     shutil.copyfile(source, target, follow_symlinks=follow_symlinks)
     with open(target, "ab") as handle:
+        shutil.copystat(source, target, follow_symlinks=follow_symlinks)
         handle.flush()
         os.fsync(handle.fileno())
-    shutil.copystat(source, target, follow_symlinks=follow_symlinks)
     return target
 
 
