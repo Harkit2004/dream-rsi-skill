@@ -67,18 +67,18 @@ Running the same command again resumes: cycles with a record are read back, not 
 
 ## Status
 
-Early — nothing is implemented yet. The [issues](../../issues) hold the plan, phased and ordered, and each one names what blocks it. Issues labelled `blocked` have open blockers: don't start them, because the interfaces they depend on aren't settled.
+Phases 0–4 have landed and the loop runs end to end — run the [Quickstart](#quickstart) above to see it. The [issues](../../issues) hold what remains. Issues labelled `blocked` have open blockers: don't start them, because the interfaces they depend on aren't settled.
 
-| Phase | What lands | Issues |
-|---|---|---|
-| 0 — Foundations | Tree schema, evaluator and agent protocols | [#1](../../issues/1)–[#3](../../issues/3) |
-| 1 — Record | Orchestrator, workspaces, first real trees | [#4](../../issues/4)–[#6](../../issues/6) |
-| 2 — Replay | Frozen replay world, Equation 1, determinism | [#7](../../issues/7)–[#9](../../issues/9) |
-| 3 — Dream | Policy interface, dreaming sweep, sandbox, refinement, selection | [#10](../../issues/10)–[#15](../../issues/15) |
-| 4 — Loop | The full RSI driver, pool management, cost accounting | [#16](../../issues/16)–[#18](../../issues/18) |
-| 5 — Surface | Skill description, quickstart, grid planning, validation | [#19](../../issues/19)–[#23](../../issues/23) |
+| Phase | What lands | Issues | Status |
+|---|---|---|---|
+| 0 — Foundations | Tree schema, evaluator and agent protocols | [#1](../../issues/1)–[#3](../../issues/3) | landed |
+| 1 — Record | Orchestrator, workspaces, first real trees | [#4](../../issues/4)–[#6](../../issues/6) | landed |
+| 2 — Replay | Frozen replay world, Equation 1, determinism | [#7](../../issues/7)–[#9](../../issues/9) | landed |
+| 3 — Dream | Policy interface, dreaming sweep, sandbox, refinement, selection | [#10](../../issues/10)–[#15](../../issues/15) | landed |
+| 4 — Loop | The full RSI driver, pool management, cost accounting | [#16](../../issues/16)–[#18](../../issues/18) | landed |
+| 5 — Surface | Skill description, quickstart, grid planning, validation | [#19](../../issues/19)–[#23](../../issues/23) | in progress |
 
-Start at [#1](../../issues/1). It defines the data structure everything else reads and writes, so it genuinely has to come first.
+Run the [Quickstart](#quickstart) to see the loop work, or read [SKILL.md](SKILL.md) for the skill interface. [Open issues](../../issues) are what's left.
 
 ## Where this differs from the paper
 
