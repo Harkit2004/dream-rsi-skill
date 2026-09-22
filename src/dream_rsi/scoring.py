@@ -10,8 +10,9 @@ V_i^m = max_{v ∈ T_i^{m,k★}} s_v − β₁·N_i^m + β₂·N_i^m / max{1, k_
 
 A policy is rewarded for what it found, charged for how much it had to open to
 get there, and partly refunded for opening those nodes in parallel rather than
-one at a time. The three inputs come off a finished replay
-(:class:`~dream_rsi.replay.ReplayRun`), and the paper fixes what each is:
+one at a time. The three inputs come off ``run``, the
+:class:`~dream_rsi.replay.SimResult` a finished replay reports through
+:meth:`~dream_rsi.replay.ReplayRun.result`, and the paper fixes what each is:
 
 * **attainment** — ``max_v s_v`` over the revealed subtree. Node scores are
   canonical ``s_v``, larger-is-better (§3), so a lower-is-better task is
@@ -20,7 +21,7 @@ one at a time. The three inputs come off a finished replay
   revealed.
 * **revealed** — ``N_i^m = |T_i^{m,k★}| − 1``, "the number of revealed non-root
   nodes", standing in for the generation–evaluation requests the trajectory
-  represents. That is ``len(run.revealed) - 1``.
+  represents. That is ``run.revealed``, equivalently ``len(run.curve)``.
 * **rounds** — ``k_i^{m,★}``, "the number of completed rounds at termination".
   Not the width of a batch: the term "rewards the average number of attempts
   executed per decision round", so the same reveals batched into fewer rounds
