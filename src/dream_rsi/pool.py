@@ -13,7 +13,11 @@ Three things it owes its callers.
 the pool and renames it into place, so the name appears only once the bytes are
 there. A run interrupted mid-add leaves a pool that still lists and still loads
 — it is simply one tree short, and the cycle that was recording that tree is
-redone from the top anyway (see :mod:`dream_rsi.run`).
+redone from the top anyway (see :mod:`dream_rsi.run`). The rename is durable as
+well as atomic (:mod:`dream_rsi.durable`): the tree is flushed before its name
+appears and the pool directory after it, because the next session may be running
+after the machine — not only the process — went away, and a pool entry that is a
+name and no bytes is the failure that would find.
 
 **The pool is measurable.** :meth:`SimulatorPool.stats` counts the trees, their
 nodes and their bytes, because the dreaming bill is that count times ``M``:
@@ -30,12 +34,12 @@ trees and builds simulators, and never a discovery agent or an evaluator.
 
 from __future__ import annotations
 
-import os
 import random
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from dream_rsi import durable
 from dream_rsi.dream import ReplayWorld
 from dream_rsi.replay import DEFAULT_SEED, ReplaySimulator
 from dream_rsi.tree import DiscoveryTree
@@ -158,15 +162,18 @@ class SimulatorPool:
         Written beside its final path and renamed onto it, so a reader sees the
         tree it asked for or no tree at all — never a truncated one, which for a
         store whose point is being read back in a later session is the worse
-        outcome. Adding a name the pool already holds replaces it: the driver
-        re-adds a cycle's tree when that cycle is redone.
+        outcome. The staging file is flushed before the rename and the pool
+        directory after it (:mod:`dream_rsi.durable`), so "or no tree at all"
+        holds across a power loss and not only across a killed process. Adding a
+        name the pool already holds replaces it: the driver re-adds a cycle's
+        tree when that cycle is redone.
         """
         path = self._path(name)
         self._directory.mkdir(parents=True, exist_ok=True)
         staging = path.with_name(path.name + STAGING_SUFFIX)
         tree.save(staging)
         try:
-            os.replace(staging, path)
+            durable.publish(staging, path)
         except OSError:
             staging.unlink(missing_ok=True)
             raise

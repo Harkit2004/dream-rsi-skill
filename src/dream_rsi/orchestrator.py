@@ -41,6 +41,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from dream_rsi import durable
 from dream_rsi.adapters.agent import AgentContext, CodingAgent
 from dream_rsi.adapters.evaluator import EvalResult, TaskEvaluator, safe_evaluate
 from dream_rsi.adapters.fake_agent import FakeAgent
@@ -190,6 +191,11 @@ class Rollout:
         round log sits beside it rather than inside it: rounds are a property of
         the rollout that recorded the tree, not of the tree itself, and a replay
         world is built from the tree alone.
+
+        Both are flushed to the device as they are written
+        (:mod:`dream_rsi.durable`), so a cycle that publishes its tree here can
+        publish the record that vouches for it afterwards and be trusted after a
+        power loss as much as after a crash of this process.
         """
         target = Path(directory)
         target.mkdir(parents=True, exist_ok=True)
@@ -198,8 +204,8 @@ class Rollout:
             "stop_reason": self.stop_reason,
             "rounds": [round_.to_dict() for round_ in self.rounds],
         }
-        (target / ROUNDS_FILENAME).write_text(
-            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        durable.write(
+            target / ROUNDS_FILENAME, json.dumps(payload, indent=2, sort_keys=True) + "\n"
         )
 
 

@@ -25,13 +25,17 @@ this is the only place that happens. It goes behind the same boundary, so there
 is no path anywhere in the package by which policy source runs in the harness
 process.
 
-**A cycle is atomic.** Each one writes its tree, the policy it deployed and the
-policy it selected into its own directory, and a record last of all, by rename.
-So the record existing means the cycle finished, a run resumes by reading the
-records it finds, and a cycle interrupted half-way is redone from the top rather
-than patched up. That is what makes a crash in cycle 5 cost cycle 5. What the
-records cannot say is what they were produced under, so a manifest written
-before the first cycle says it and a resume is held to it (issue #45).
+**A cycle is atomic, and a finished one is durable.** Each one writes its tree,
+the policy it deployed and the policy it selected into its own directory, and a
+record last of all, by rename. So the record existing means the cycle finished,
+a run resumes by reading the records it finds, and a cycle interrupted half-way
+is redone from the top rather than patched up. That is what makes a crash in
+cycle 5 cost cycle 5. Every one of those writes is flushed to the device in the
+order the record needs (:mod:`dream_rsi.durable`), so a *finished* cycle is not
+something a power loss can take back either: the record is the last thing
+written and everything it vouches for is already on disk. What the records
+cannot say is what they were produced under, so a manifest written before the
+first cycle says it and a resume is held to it (issue #45).
 
 **The cost report is the driver's.** Each half of a cycle counts what it spent
 where it spends it — agent calls in the rollout, model calls and revealed nodes
@@ -56,7 +60,6 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
-import os
 import shutil
 import time
 from collections.abc import Mapping, Sequence
@@ -65,6 +68,7 @@ from itertools import accumulate
 from pathlib import Path
 from typing import Any
 
+from dream_rsi import durable
 from dream_rsi.adapters.agent import CodingAgent
 from dream_rsi.adapters.evaluator import TaskEvaluator
 from dream_rsi.adapters.fake_developer import FakeDeveloper
@@ -884,7 +888,13 @@ def _read(path: Path) -> str:
 
 
 def _write(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8")
+    """Write one of a cycle's own files, durably (:mod:`dream_rsi.durable`).
+
+    Everything this writes — the deployed policy, the selected one, the timing,
+    the manifest — is read back by a later session, so it is flushed to disk
+    rather than left in the page cache for the machine to lose.
+    """
+    durable.write(path, text)
 
 
 def _read_record(directory: Path) -> CycleRecord:
@@ -931,14 +941,13 @@ def _write_record(path: Path, record: CycleRecord) -> None:
     """Write the record by rename, so it appears whole or not at all.
 
     The cycle is finished when this file is there, and every other file it
-    promises was written before it. A half-written record would be a cycle a
-    resumed run trusts and cannot read.
+    promises was written before it — durably, through :mod:`dream_rsi.durable`,
+    so that "before" is an order on the disk and not only on the clock. A
+    half-written record would be a cycle a resumed run trusts and cannot read.
     """
     staging = path.with_name(path.name + ".tmp")
-    staging.write_text(
-        json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    os.replace(staging, path)
+    _write(staging, json.dumps(record.to_dict(), indent=2, sort_keys=True) + "\n")
+    durable.publish(staging, path)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

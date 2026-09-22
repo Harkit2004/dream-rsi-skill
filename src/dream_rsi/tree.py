@@ -22,6 +22,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from dream_rsi import durable
+
 __all__ = [
     "SCHEMA_VERSION",
     "DiscoveryTree",
@@ -236,12 +238,18 @@ class DiscoveryTree:
         that only this module can read back is not the portable record a
         discovery run is inspected from, so a tree carrying one fails here
         rather than on whoever reads it.
+
+        The write is flushed to the device before it returns
+        (:mod:`dream_rsi.durable`), which is what makes the order a cycle
+        publishes in mean anything: a tree this saved is one the record written
+        after it can vouch for across a power loss, not only across a crash of
+        the process that wrote them both.
         """
         try:
             text = json.dumps(self.to_dict(), indent=2, sort_keys=True, allow_nan=False) + "\n"
         except (TypeError, ValueError) as exc:
             raise TreeInvariantError(f"this tree cannot be written as standard JSON: {exc}") from exc
-        Path(path).write_text(text, encoding="utf-8")
+        durable.write(path, text)
 
     @classmethod
     def load(cls, path: str | Path) -> DiscoveryTree:

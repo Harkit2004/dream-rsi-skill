@@ -108,6 +108,76 @@ def test_an_add_that_dies_before_it_publishes_leaves_the_pool_valid(
     assert SimulatorPool(tmp_path / "pool").names() == ("cycle_000", "cycle_001")
 
 
+def test_publishing_a_tree_flushes_it_before_the_name_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #47's durable branch: the bytes reach the device before the name does.
+
+    ``os.replace`` orders the rename against the tree's data only once that data
+    has been flushed, so a staging file renamed without a sync can come back from
+    a power loss as a name and no bytes — and a store whose whole point is being
+    read in a later session finds that out in the later session.
+
+    Watched rather than crashed, because an in-process failure cannot lose a page
+    cache: the tree's sync has to come before the rename, and — where the
+    platform can sync a directory at all — the directory's has to come after it,
+    the rename being a change to that directory.
+    """
+    pool = SimulatorPool(tmp_path / "pool")
+    events: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(descriptor: int) -> None:
+        events.append("sync")
+        real_fsync(descriptor)
+
+    def replace(source: object, target: object) -> None:
+        events.append("rename")
+        real_replace(source, target)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "replace", replace)
+
+    pool.add("cycle_000", _tree(3))
+
+    assert events.count("rename") == 1
+    rename = events.index("rename")
+    assert "sync" in events[:rename], "the tree is flushed before its name appears"
+    if os.name != "nt":  # Windows cannot open a directory to sync it
+        assert "sync" in events[rename + 1 :], "the directory is flushed after the rename"
+    assert [len(world.simulator) for world in pool.worlds()] == [4]
+
+
+def test_publishing_a_tree_does_not_sync_once_per_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Durability is bought in device round trips, so it may not scale with a tree.
+
+    Issue #47: adding a tree has to stay fast enough not to change how a cycle is
+    timed. A publish that flushed per node — or a layout that stored nodes
+    separately and flushed each one — would make the pool's cost grow with every
+    attempt recorded. Counted rather than clocked: a clock would measure the
+    machine, and the contract is that the count does not grow with the tree.
+    """
+    pool = SimulatorPool(tmp_path / "pool")
+    real_fsync = os.fsync
+    syncs: list[int] = []
+    counts: list[int] = []
+
+    def fsync(descriptor: int) -> None:
+        syncs.append(descriptor)
+        real_fsync(descriptor)
+
+    for attempts in (1, 128):
+        syncs.clear()
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "fsync", fsync)
+            pool.add(f"cycle_{attempts:03d}", _tree(attempts))
+        counts.append(len(syncs))
+
+    assert counts[0] == counts[1] > 0
+
+
 @pytest.mark.parametrize("name", ["", ".", "..", "../escape", "nested/tree"])
 def test_a_tree_name_that_is_not_a_plain_filename_is_refused(tmp_path: Path, name: str) -> None:
     """A name is a name, not a path: nothing is written outside the pool.
