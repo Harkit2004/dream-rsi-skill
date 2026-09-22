@@ -63,7 +63,18 @@ class RandomWalk:
             return ()
         self._left -= 1
         size = self._rng.randint(1, width)
-        return tuple(self._rng.choice(eligible) for _ in range(size))
+        pool = list(eligible)
+        batch: list[str] = []
+        for _ in range(size):
+            node_id = self._rng.choice(pool)
+            batch.append(node_id)
+            if node_id != tree.root_id:
+                # A legal batch names the root as often as it likes and every
+                # other node at most once (issue #56), so a non-root id leaves
+                # the pool and the root stays in it. Width still varies from 1
+                # to ``width``, and the draws stay the policy's only randomness.
+                pool.remove(node_id)
+        return tuple(batch)
 
 
 @dataclass

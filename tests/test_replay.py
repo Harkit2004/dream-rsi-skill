@@ -143,6 +143,50 @@ def test_selecting_a_revealed_interior_node_raises() -> None:
         run.reveal((opened,))
 
 
+def test_selecting_a_leaf_twice_in_one_batch_raises() -> None:
+    """Only the root may repeat in a batch — here as in the online rollout (A§B.2).
+
+    §3: "both the online and offline phases use this same decision interface",
+    so the two drivers must agree on what a legal batch is (issue #56). Replay
+    used to take a second selection of a leaf as a walk to the next recorded
+    child and reveal nothing where none exists, which lets a policy that
+    duplicates a leaf score in replay and then take the online rollout down
+    with ``ValueError`` the round it is deployed. The refusal names the node,
+    as the two refusals above do, and carries the words
+    ``orchestrator._check_batch`` speaks — ``tests/test_orchestrator.py`` pins
+    the same phrase — so the two wordings cannot drift apart unnoticed.
+    """
+    tree = DiscoveryTree.with_root()
+    tree.add_child(tree.root_id, score=1.0)
+    tree.add_child(tree.root_id, score=2.0)
+    run = ReplaySimulator(tree).start()
+    leaf, _ = run.reveal((tree.root_id, tree.root_id)).revealed
+
+    with pytest.raises(ValueError, match=r"only the root") as raised:
+        run.reveal((leaf, leaf))
+
+    assert leaf in str(raised.value)
+
+
+def test_naming_the_root_several_times_in_one_batch_opens_that_many_branches() -> None:
+    """The root is the one id a batch may repeat, and each repeat is a branch.
+
+    The refusal of a repeated leaf is easy to over-apply into "no id twice",
+    which would hold a replay to one branch per round and lose §4's wide root
+    fan-out: a rollout that ran 10 parallel workspaces off the root is
+    re-traced in one batch only because the root may be named ten times.
+    """
+    tree = DiscoveryTree.with_root()
+    for score in (1.0, 2.0, 3.0):
+        tree.add_child(tree.root_id, score=score)
+    run = ReplaySimulator(tree).start()
+
+    opened = run.reveal((tree.root_id, tree.root_id, tree.root_id)).revealed
+
+    assert len(opened) == 3
+    assert set(opened) == {node.id for node in tree.children(tree.root_id)}
+
+
 def test_a_leaf_with_no_recorded_continuation_reveals_nothing_and_the_run_continues() -> None:
     """Walking off the recorded tree returns the empty set, not a fallback.
 
