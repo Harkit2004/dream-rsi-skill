@@ -44,6 +44,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from dream_rsi import durable
+
 __all__ = ["SnapshotError", "SnapshotStore"]
 
 _SNAPSHOTS_DIRNAME = "snapshots"
@@ -87,7 +89,9 @@ class SnapshotStore:
         The ref describes what was stored: it is the digest of the copy this
         made, so it stays a content address even if the workspace was still
         changing while it was read. Capturing a state already recorded returns
-        the existing ref and copies nothing.
+        the existing ref and copies nothing. The copy and the ref reach the
+        device together (:mod:`dream_rsi.durable`), so a node a later session
+        reads points at a state that survived the power loss with its tree.
         """
         source = Path(directory)
         # The copy below runs through the store's own staging directory, so a
@@ -103,13 +107,15 @@ class SnapshotStore:
         if (snapshots / ref).is_dir():
             return ref
 
-        snapshots.mkdir(parents=True, exist_ok=True)
+        durable.mkdir(snapshots)
         # Copied aside and renamed into place, so a reader never sees a
-        # half-written snapshot under a ref that promises the whole state.
+        # half-written snapshot under a ref that promises the whole state — and
+        # flushed on the way (`durable`), so the ref survives a power loss with
+        # bytes that do too rather than naming a copy the machine lost.
         staging = Path(tempfile.mkdtemp(dir=snapshots, prefix=".staging-"))
         try:
             state = staging / "state"
-            shutil.copytree(source, state, symlinks=True)
+            durable.copy_tree(source, state)
             # Digested after the copy, not before: the ref has to describe the
             # bytes this actually stores. The two differ only if the workspace
             # changed while it was being read — an agent that left something
@@ -119,7 +125,7 @@ class SnapshotStore:
             target = snapshots / ref
             if not target.is_dir():
                 try:
-                    os.replace(state, target)
+                    durable.publish(state, target)
                 except OSError:
                     # Another worker captured the same state first. Same digest,
                     # same bytes: theirs will do.

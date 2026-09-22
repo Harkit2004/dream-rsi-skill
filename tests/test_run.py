@@ -32,11 +32,12 @@ from dream_rsi.orchestrator import (
     TREE_FILENAME,
     RolloutConfig,
 )
-from dream_rsi.pool import PoolConfig
+from dream_rsi.pool import TREE_SUFFIX, PoolConfig
 from dream_rsi.run import (
     CYCLE_TEMPLATE,
     CYCLES_DIRNAME,
     MANIFEST_FILENAME,
+    NEXT_POLICY_FILENAME,
     POLICY_FILENAME,
     POOL_DIRNAME,
     RECORD_FILENAME,
@@ -493,6 +494,62 @@ def test_a_resumed_run_restores_a_pool_tree_that_will_not_load(tmp_path: Path) -
 
     resumed = _run(tmp_path, ScriptedDeveloper(), cycles=2)
 
+    assert resumed.pool == whole.pool
+    assert resumed.stats == whole.stats
+
+
+# Every file a finished cycle publishes, as a path under the run directory, and
+# what a run resumed with that file gone has to do: carry on with the history it
+# had, or refuse with a RunError naming what is missing. The last entry is the
+# state the publish order exists to rule out — a record whose tree is gone from
+# the pool *and* from the cycle's own copy — which nothing can recover and so
+# has to be the refusal rather than a history nobody chose.
+_PUBLISHED = (
+    pytest.param((MANIFEST_FILENAME,), "refused", id="manifest"),
+    pytest.param((f"{CYCLES_DIRNAME}/cycle_000/{RECORD_FILENAME}",), "resumed", id="record"),
+    pytest.param((f"{CYCLES_DIRNAME}/cycle_000/{TREE_FILENAME}",), "resumed", id="cycle-tree"),
+    pytest.param((f"{CYCLES_DIRNAME}/cycle_000/rounds.json",), "resumed", id="round-log"),
+    pytest.param((f"{CYCLES_DIRNAME}/cycle_000/{POLICY_FILENAME}",), "refused", id="policy"),
+    pytest.param(
+        (f"{CYCLES_DIRNAME}/cycle_000/{NEXT_POLICY_FILENAME}",), "refused", id="next-policy"
+    ),
+    pytest.param((f"{CYCLES_DIRNAME}/cycle_000/{TIMING_FILENAME}",), "resumed", id="timing"),
+    pytest.param((f"{POOL_DIRNAME}/cycle_000{TREE_SUFFIX}",), "resumed", id="pool-entry"),
+    pytest.param(
+        (f"{CYCLES_DIRNAME}/cycle_000/{TREE_FILENAME}", f"{POOL_DIRNAME}/cycle_000{TREE_SUFFIX}"),
+        "refused",
+        id="tree-and-pool-entry",
+    ),
+)
+
+
+@pytest.mark.parametrize(("missing", "outcome"), _PUBLISHED)
+def test_a_run_directory_missing_a_published_file_resumes_or_says_why(
+    tmp_path: Path, missing: tuple[str, ...], outcome: str
+) -> None:
+    """Issue #47's "tests first": what a crash leaves behind is still readable.
+
+    Power loss is the one failure a test cannot stage, so what is pinned here is
+    the state it leaves: take a published file away and a resumed run either
+    carries on with the history it had or refuses with a :class:`RunError`
+    naming what is gone. A traceback out of a loader is neither — and a shorter
+    history nobody chose is worse than either, which is what the tree-and-
+    pool-entry case checks: a record is trusted only while the tree it vouches
+    for can be found, and when it cannot the run says so.
+    """
+    whole = _run(tmp_path / "whole", ScriptedDeveloper(), cycles=1)
+    damaged = tmp_path / "damaged"
+    shutil.copytree(tmp_path / "whole", damaged)
+    for name in missing:
+        (damaged / name).unlink()
+
+    if outcome == "refused":
+        with pytest.raises(RunError) as refusal:
+            _run(damaged, ScriptedDeveloper(), cycles=1)
+        assert Path(missing[0]).name in str(refusal.value)
+        return
+
+    resumed = _run(damaged, ScriptedDeveloper(), cycles=1)
     assert resumed.pool == whole.pool
     assert resumed.stats == whole.stats
 
