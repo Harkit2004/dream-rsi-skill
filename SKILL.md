@@ -1,6 +1,16 @@
 ---
 name: dream-rsi
-description: Self-improving exploration for expensive search — record a discovery run as a tree of scored attempts, replay that frozen tree to score candidate exploration policies off-policy, rewrite the policy's Python from the replay feedback, and redeploy it (the Dream-RSI loop). Use when an automatic evaluator scores every candidate, one evaluation is expensive (compilation, benchmarking, long runs), and the same search will be run again — algorithm engineering, GPU kernel optimization, mathematical optimization, configuration or hyperparameter search — so that the search strategy itself improves across runs, not just the solutions it finds. Not for one-shot coding work: writing, debugging, reviewing or explaining a program, not for searching or grepping a codebase, and not for a search with no automatic scorer or no repeat runs, which leaves nothing for a replay simulator to be built from.
+description: >-
+  Self-improving exploration for expensive search — record a discovery run as a tree of scored
+  attempts, replay that frozen tree to score candidate exploration policies off-policy, rewrite
+  the policy's Python from the replay feedback, and redeploy it (the Dream-RSI loop). Use when an
+  automatic evaluator scores every candidate, one evaluation is expensive (compilation,
+  benchmarking, long runs), and the same search will be run again — algorithm engineering, GPU
+  kernel optimization, mathematical optimization, configuration or hyperparameter search — so that
+  the search strategy itself improves across runs, not just the solutions it finds. Not for
+  one-shot coding work: writing, debugging, reviewing or explaining a program, not for searching
+  or grepping a codebase, and not for a search with no automatic scorer or no repeat runs, which
+  leaves nothing for a replay simulator to be built from.
 ---
 
 # Dream-RSI
