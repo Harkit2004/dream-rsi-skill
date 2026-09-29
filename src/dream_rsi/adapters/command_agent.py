@@ -71,7 +71,12 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from string import Template
 
-from dream_rsi.adapters._command import CommandOutcome, run_command, tail_of
+from dream_rsi.adapters._command import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    CommandOutcome,
+    run_command,
+    tail_of,
+)
 from dream_rsi.adapters.agent import AgentContext, Artifact
 from dream_rsi.adapters.command_evaluator import ERROR_PATH, SCORE_PATH
 from dream_rsi.tree import Node
@@ -147,6 +152,7 @@ class CommandAgent:
     prompt_via: str = "argument"
     direction_guidance: str = ""
     baseline_dir: Path | None = None
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
 
     def __post_init__(self) -> None:
         if isinstance(self.command, str) or not self.command:
@@ -158,6 +164,8 @@ class CommandAgent:
             raise TypeError(f"command must be a list of strings, got {self.command!r}")
         if self.timeout <= 0:
             raise ValueError(f"timeout must be positive, got {self.timeout}")
+        if self.max_output_bytes <= 0:
+            raise ValueError(f"max_output_bytes must be positive, got {self.max_output_bytes}")
         if self.prompt_via not in _PROMPT_VIA:
             raise ValueError(f"prompt_via must be one of {_PROMPT_VIA}, got {self.prompt_via!r}")
         name = PurePath(self.eval_program)
@@ -205,6 +213,10 @@ class CommandAgent:
             shutil.rmtree(work / _BASELINE, ignore_errors=True)
             (work / _PROBLEM).unlink(missing_ok=True)
 
+        if outcome.exceeded:
+            raise CommandAgentError(
+                _failure("the command printed without end and was stopped", outcome.output)
+            )
         if outcome.status is None:
             raise CommandAgentError(
                 _failure(f"the command timed out after {self.timeout:g}s", outcome.output)
@@ -246,7 +258,12 @@ class CommandAgent:
             argv, stdin = [*self.command, prompt], None
         try:
             return run_command(
-                argv, cwd=node_dir, timeout=self.timeout, stdin=stdin, env=environment
+                argv,
+                cwd=node_dir,
+                timeout=self.timeout,
+                stdin=stdin,
+                env=environment,
+                max_output_bytes=self.max_output_bytes,
             )
         except OSError as exc:
             raise CommandAgentError(

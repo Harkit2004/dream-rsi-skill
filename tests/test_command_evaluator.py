@@ -20,6 +20,7 @@ from dream_rsi.adapters.command_evaluator import (
     EVAL_ERROR,
     MALFORMED_SCORE,
     NO_SCORE,
+    OUTPUT_LIMIT,
     SCORE_PATH,
     TIMEOUT,
     CommandEvaluator,
@@ -217,6 +218,9 @@ def _is_gone(pid: int, *, patience: float = 10.0) -> bool:
         pytest.param('{"score": "1.0", "correct": true}', id="string-score"),
         pytest.param('{"score": true, "correct": true}', id="boolean-score"),
         pytest.param("[1, 2]", id="not-an-object"),
+        # JSON integers are unbounded, and converting this one to a float raises
+        # OverflowError, which must not escape as anything but a failed result.
+        pytest.param('{"score": %s, "correct": true}' % ("1" + "0" * 400), id="huge-integer-score"),
     ],
 )
 def test_a_malformed_score_file_gives_a_failed_result_not_a_crash(
@@ -231,6 +235,51 @@ def test_a_malformed_score_file_gives_a_failed_result_not_a_crash(
     assert not result.evaluated
     assert result.score is None
     assert result.fail_class == MALFORMED_SCORE
+
+
+def test_a_scorer_that_prints_without_end_is_stopped_before_it_fills_the_disk(
+    tmp_path: Path,
+) -> None:
+    """A print loop writes gigabytes a second, and the timeout is minutes away.
+
+    Its output goes to a file so a child left behind cannot hold the loop up, and a
+    file has no size of its own: without a cap the disk is what stops the scorer.
+    """
+    body = """
+        chunk = "x" * 65536
+        while True:
+            sys.stdout.write(chunk)
+    """
+    # A timeout well past what stopping it on size takes, so it is the size that ends it.
+    evaluator = CommandEvaluator(
+        _scorer(tmp_path, body), HIGHER, timeout=20.0, max_output_bytes=1024 * 1024
+    )
+    started = time.monotonic()
+
+    result = evaluator.evaluate("candidate\n", _workspace(tmp_path))
+
+    assert time.monotonic() - started < 10
+    assert not result.evaluated
+    assert result.score is None
+    assert result.fail_class == OUTPUT_LIMIT
+    # What the agent reads next is the tail of it, not a megabyte.
+    assert len(result.diagnostics) < 10_000
+
+
+def test_an_error_file_far_larger_than_anyone_reads_is_read_only_at_its_tail(
+    tmp_path: Path,
+) -> None:
+    body = """
+        Path("eval/error.txt").write_text("head-marker " + "x" * 5_000_000 + " tail-marker")
+    """
+    evaluator = CommandEvaluator(_scorer(tmp_path, body), HIGHER, timeout=QUICK)
+
+    result = evaluator.evaluate("candidate\n", _workspace(tmp_path))
+
+    assert result.error is not None
+    assert len(result.error) <= 4096
+    assert result.error.endswith("tail-marker")
+    assert "head-marker" not in result.error
 
 
 def test_a_scorer_may_name_its_own_failure_class_and_explain_it(tmp_path: Path) -> None:

@@ -49,7 +49,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
-from dream_rsi.adapters._command import CommandOutcome, run_command, tail_of
+from dream_rsi.adapters._command import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    CommandOutcome,
+    run_command,
+    tail_of_file,
+)
 from dream_rsi.adapters.evaluator import EvalResult, ScoreDirection
 
 __all__ = [
@@ -57,6 +62,7 @@ __all__ = [
     "EVAL_ERROR",
     "MALFORMED_SCORE",
     "NO_SCORE",
+    "OUTPUT_LIMIT",
     "SCORE_PATH",
     "TIMEOUT",
     "CommandEvaluator",
@@ -74,6 +80,7 @@ TIMEOUT = "timeout"
 EVAL_ERROR = "eval_error"
 NO_SCORE = "no_score"
 MALFORMED_SCORE = "malformed_score"
+OUTPUT_LIMIT = "output_limit"
 
 # PAPER-GAP: the paper says nothing about how long an evaluation may run. Its
 # evaluations are compilations, benchmarks and long runs (§1), so a limit tight
@@ -103,7 +110,8 @@ class CommandEvaluator:
     * a non-zero exit, or ``eval/error.txt``: a failed result carrying the error
       text. Either wins over a score file. Exit 0 with neither file is a failure.
     * the tail of its stdout and stderr is appended to the diagnostics either way.
-    * outliving ``timeout`` is a failure with ``fail_class`` :data:`TIMEOUT`.
+    * outliving ``timeout`` is a failure with ``fail_class`` :data:`TIMEOUT`, and
+      printing more than ``max_output_bytes`` is one with :data:`OUTPUT_LIMIT`.
 
     Nothing the command does raises: a bad score file is a failed result too.
     The module docstring has the reasoning.
@@ -114,6 +122,7 @@ class CommandEvaluator:
     baseline_score: float | None = None
     timeout: float = _DEFAULT_TIMEOUT
     artifact_name: str = "solution.py"
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
 
     def __post_init__(self) -> None:
         if isinstance(self.command, str) or not self.command:
@@ -125,6 +134,8 @@ class CommandEvaluator:
             raise TypeError(f"command must be a list of strings, got {self.command!r}")
         if self.timeout <= 0:
             raise ValueError(f"timeout must be positive, got {self.timeout}")
+        if self.max_output_bytes <= 0:
+            raise ValueError(f"max_output_bytes must be positive, got {self.max_output_bytes}")
         name = PurePath(self.artifact_name)
         if not self.artifact_name or name.is_absolute() or ".." in name.parts:
             raise ValueError(
@@ -144,12 +155,24 @@ class CommandEvaluator:
             stale.unlink(missing_ok=True)
 
         try:
-            outcome = run_command(self.command, cwd=workspace, timeout=self.timeout)
+            outcome = run_command(
+                self.command,
+                cwd=workspace,
+                timeout=self.timeout,
+                max_output_bytes=self.max_output_bytes,
+            )
         except OSError as exc:
             # The command could not be started at all — not on the path, not
             # executable — which is the task's wiring and not the candidate.
             return EvalResult.failed(
                 f"could not run {self.command[0]!r}: {exc.strerror or exc}", fail_class=EVAL_ERROR
+            )
+        if outcome.exceeded:
+            reason = f"printed more than {self.max_output_bytes} bytes and was stopped"
+            return EvalResult.failed(
+                reason,
+                fail_class=OUTPUT_LIMIT,
+                diagnostics=_with_output(reason, outcome.output),
             )
         if outcome.status is None:
             timed_out = f"timed out after {self.timeout:g}s"
@@ -165,7 +188,7 @@ class CommandEvaluator:
         output = outcome.output
         error_file = workspace / ERROR_PATH
         if error_file.is_file():
-            error = tail_of(error_file.read_text(encoding="utf-8", errors="replace"))
+            error = tail_of_file(error_file)
             return EvalResult.failed(
                 error or "the command wrote an empty eval/error.txt",
                 fail_class=EVAL_ERROR,
@@ -197,8 +220,16 @@ def _parse_score(path: Path, output: str) -> EvalResult:
     score = payload.get("score")
     # ``bool`` is an ``int``, and a scorer that wrote ``true`` for its score has not
     # measured anything.
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
         return _malformed(f'eval/score.json needs a finite number "score", got {score!r}', output)
+    try:
+        number = float(score)
+    except OverflowError:  # a JSON integer has no size limit and a float does
+        number = math.inf
+    if not math.isfinite(number):
+        return _malformed(
+            f'eval/score.json needs a finite number "score", got {str(score)[:40]}', output
+        )
     correct = payload.get("correct")
     if not isinstance(correct, bool):
         return _malformed(f'eval/score.json needs a boolean "correct", got {correct!r}', output)
@@ -210,7 +241,7 @@ def _parse_score(path: Path, output: str) -> EvalResult:
         return _malformed(f'"diagnostics" must be a string, got {diagnostics!r}', output)
 
     return EvalResult(
-        score=float(score),
+        score=number,
         correct=correct,
         diagnostics=_with_output(diagnostics, output),
         fail_class=fail_class,

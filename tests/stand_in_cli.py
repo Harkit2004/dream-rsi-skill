@@ -16,7 +16,8 @@ renders, lists them in one sentence — ``Variables (`node`, `history`, `baselin
 * ``write`` (default): a proposal and a program, both naming the seed.
 * ``plan``: a program the toy task can score, ``PLAN = (width, depth)``.
 * ``fail``: prints to stderr and exits 3.  ``write-then-fail``: writes a good
-  attempt and *then* exits 4.  ``hang``: never returns.
+  attempt and *then* exits 4.  ``hang``: never returns.  ``flood``: prints without
+  end.
 * ``no-program``, ``empty-program``, ``unchanged``, ``no-proposal``: the ways an
   attempt can leave the workspace short of what was asked for.
 
@@ -67,6 +68,10 @@ def main() -> int:
     if args.mode == "hang":
         time.sleep(600)
         return 0
+    if args.mode == "flood":
+        chunk = "x" * 65536
+        while True:
+            sys.stdout.write(chunk)
     if args.mode == "unchanged":
         return 0
     if args.mode != "no-proposal":

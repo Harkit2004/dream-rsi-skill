@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -250,6 +251,23 @@ def test_a_command_that_hangs_is_stopped_at_the_timeout(tmp_path: Path, log: Pat
 
     with pytest.raises(CommandAgentError, match="timed out"):
         hanging.propose(_context(tmp_path / "ws"))
+
+
+def test_a_command_that_prints_without_end_is_stopped_before_it_fills_the_disk(
+    tmp_path: Path, log: Path
+) -> None:
+    flooding = CommandAgent(
+        [sys.executable, STAND_IN, "--mode", "flood"],
+        template=TEMPLATE,
+        timeout=20.0,
+        max_output_bytes=1024 * 1024,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(CommandAgentError, match="without end"):
+        flooding.propose(_context(tmp_path / "ws"))
+
+    assert time.monotonic() - started < 10
 
 
 def test_a_program_the_parent_already_had_is_not_a_new_attempt(tmp_path: Path, log: Path) -> None:
