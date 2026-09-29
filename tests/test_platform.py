@@ -68,7 +68,9 @@ def test_the_cli_refuses_a_non_posix_platform_in_one_line_and_starts_nothing(
     code = run.main([str(directory)])
 
     captured = capsys.readouterr()
-    assert code != 0
+    # The status a command refused before it ran anything exits with, not merely
+    # "some failure": that is what lets a caller tell "did not start" from a crash.
+    assert code == run.EXIT_REFUSED
     lines = captured.err.strip().splitlines()
     assert len(lines) == 1, captured.err
     assert "Linux" in lines[0]
