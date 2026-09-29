@@ -77,6 +77,7 @@ __all__ = [
     "PolicyDeveloper",
     "Rejection",
     "RevisionContext",
+    "RevisionFailed",
     "develop",
     "validate_source",
 ]
@@ -116,6 +117,19 @@ class Rejection:
 
     source: str
     reason: str
+
+
+class RevisionFailed(RuntimeError):
+    """A development agent ran and could not produce a revision, and why.
+
+    For an adapter whose agent *failed* — a command that exited non-zero, timed out
+    or wrote nothing — as against one that answered with something unusable, which
+    is what :func:`validate_source` is for. The round treats the two alike: a
+    refusal with its reason, shown to the next attempt, and after ``attempts`` of
+    them the round stops with the versions it has, so the incumbent is still
+    selectable. A cycle is not lost to a CLI having a bad minute, and the reason
+    (what the agent printed) is the one thing a person reading the round needs.
+    """
 
 
 @dataclass(frozen=True)
@@ -165,7 +179,11 @@ class PolicyDeveloper(Protocol):
     """
 
     def revise(self, context: RevisionContext) -> str:
-        """The next version's complete module source, revised from ``context``."""
+        """The next version's complete module source, revised from ``context``.
+
+        An agent that ran and failed raises :class:`RevisionFailed`; anything else it
+        raises is a broken harness and stops the round.
+        """
         ...
 
 
@@ -361,7 +379,13 @@ def _revise(
             history=tuple(version.report for version in developed[:-1]),
             rejected=tuple(refused),
         )
-        revision = developer.revise(context)
+        try:
+            revision = developer.revise(context)
+        except RevisionFailed as failure:
+            # No output to keep, but the same outcome as unusable output: refused,
+            # said why, and asked again with the reason in front of the agent.
+            refused.append(Rejection(source="", reason=str(failure)))
+            continue
         reason = validate_source(revision)
         if reason is None:
             return revision, tuple(refused)
@@ -463,7 +487,10 @@ def _rejected_text(rejected: tuple[Rejection, ...]) -> str:
     if not rejected:
         return "(none)"
     return "\n\n".join(
+        # An agent that failed outright wrote nothing, so there is no code to show.
         f"- refused: {rejection.reason}\n\n```python\n{rejection.source.strip()}\n```"
+        if rejection.source.strip()
+        else f"- refused: {rejection.reason}"
         for rejection in rejected
     )
 
