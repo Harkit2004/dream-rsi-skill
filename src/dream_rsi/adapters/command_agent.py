@@ -74,6 +74,7 @@ from string import Template
 from dream_rsi.adapters._command import (
     DEFAULT_MAX_OUTPUT_BYTES,
     CommandOutcome,
+    is_inside,
     run_command,
     tail_of,
 )
@@ -188,6 +189,17 @@ class CommandAgent:
         work = node_dir / WORK_DIRNAME
         program = node_dir / self.eval_program
         proposal = node_dir / PROPOSAL_FILENAME
+        # This adapter writes into ``.dream_rsi/`` and reads the program and proposal
+        # back, all in a directory the model has had a shell in. A symlink an earlier
+        # attempt left would send those writes, and the removal of the history copy,
+        # somewhere else — and those reads into the record — with the harness's
+        # permissions rather than the CLI's. Refused before the command is spent.
+        for path in (work, program, proposal):
+            if not is_inside(node_dir, path):
+                raise CommandAgentError(
+                    f"{path.relative_to(node_dir)} resolves outside the workspace, so the "
+                    "harness will not read or write through it"
+                )
         # What a resumed workspace already holds: the parent's own files, which are
         # there whether or not this attempt wrote anything.
         before = (_digest(program), _digest(proposal))

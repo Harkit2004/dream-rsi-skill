@@ -270,6 +270,35 @@ def test_a_command_that_prints_without_end_is_stopped_before_it_fills_the_disk(
     assert time.monotonic() - started < 10
 
 
+@pytest.mark.parametrize("escaping", [".dream_rsi", "solution.py", "proposal.md"])
+def test_a_symlink_a_previous_attempt_left_is_never_written_or_read_through(
+    tmp_path: Path, log: Path, escaping: str
+) -> None:
+    """The workspace was resumed from a snapshot, and the agent that made it is a model.
+
+    A link out of it would send the harness's writes (the history copy, the saved
+    proposals) and its removals — or its reads of the program — somewhere else, with the
+    harness's permissions. It is refused before the CLI is spent.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    (outside / "history").mkdir(parents=True)
+    (outside / "history" / "precious.txt").write_text("keep me\n", encoding="utf-8")
+    (outside / "file.txt").write_text("keep me too\n", encoding="utf-8")
+    if escaping == ".dream_rsi":
+        (workspace / escaping).symlink_to(outside, target_is_directory=True)
+    else:
+        (workspace / escaping).symlink_to(outside / "file.txt")
+
+    with pytest.raises(CommandAgentError, match="outside the workspace"):
+        _agent().propose(_context(workspace))
+
+    assert (outside / "history" / "precious.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert (outside / "file.txt").read_text(encoding="utf-8") == "keep me too\n"
+    assert _calls(log) == [], "the CLI was run although the workspace could not be trusted"
+
+
 def test_a_program_the_parent_already_had_is_not_a_new_attempt(tmp_path: Path, log: Path) -> None:
     """A workspace is resumed from its parent's, which holds the parent's program.
 
