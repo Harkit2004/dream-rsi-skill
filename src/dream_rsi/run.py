@@ -77,6 +77,7 @@ from dream_rsi.adapters.toy_search import ToySearchAgent, ToySearchEvaluator, pl
 from dream_rsi.cost import CycleCost, CycleTiming, DreamCost, total
 from dream_rsi.develop import DEFAULT_ATTEMPTS, PolicyDeveloper, develop
 from dream_rsi.dream import DEFAULT_VERSIONS, DreamConfig, Selection, select
+from dream_rsi.lock import RunInUseError, RunLock
 from dream_rsi.orchestrator import (
     STORE_DIRNAME,
     TREE_FILENAME,
@@ -625,6 +626,11 @@ def run_cycles(
     problem or configuration raises rather than appending to a history produced
     under another run.
 
+    The directory is locked for the whole call (:class:`~dream_rsi.lock.RunLock`),
+    so at most one process ever writes to it. A second caller raises
+    :class:`~dream_rsi.lock.RunInUseError` before touching anything; the lock is
+    the operating system's, so a holder that died leaves nothing to clean up.
+
     A policy that fails online — it oversteps its limits, or answers with
     something that is not a batch — raises out of the cycle it was deployed in
     (:class:`~dream_rsi.sandbox.SandboxError`). That is deliberate: it is the
@@ -633,42 +639,45 @@ def run_cycles(
     """
     config = RunConfig() if config is None else config
     directory = Path(directory)
-    cycles = directory / CYCLES_DIRNAME
-    durable.mkdir(cycles)
-    pool = SimulatorPool(directory / POOL_DIRNAME)
+    # Before anything is read or written: a second process on a directory another
+    # one is running is refused here, with the directory as it was (issue #72).
+    with RunLock(directory):
+        cycles = directory / CYCLES_DIRNAME
+        durable.mkdir(cycles)
+        pool = SimulatorPool(directory / POOL_DIRNAME)
 
-    _check_manifest(
-        directory / MANIFEST_FILENAME,
-        RunManifest.from_config(config, policy=policy, problem=problem),
-        cycles,
-    )
-
-    records, deployed, source = _resume(cycles, config.cycles, policy, pool)
-    history = [record.world for record in records]
-    for index in range(len(records), config.cycles):
-        deployed.append(source)
-        record, source = _cycle(
-            index,
-            agent=agent,
-            evaluator=evaluator,
-            developer=developer,
-            source=source,
-            problem=problem,
-            cycle=cycles / CYCLE_TEMPLATE.format(index),
-            pool=pool,
-            history=tuple(history),
-            config=config,
-            scratch_root=scratch_root,
+        _check_manifest(
+            directory / MANIFEST_FILENAME,
+            RunManifest.from_config(config, policy=policy, problem=problem),
+            cycles,
         )
-        records.append(record)
-        history.append(record.world)
-    return Run(
-        cycles=tuple(records),
-        policies=tuple(deployed),
-        policy=source,
-        pool=pool.names(),
-        stats=pool.stats(),
-    )
+
+        records, deployed, source = _resume(cycles, config.cycles, policy, pool)
+        history = [record.world for record in records]
+        for index in range(len(records), config.cycles):
+            deployed.append(source)
+            record, source = _cycle(
+                index,
+                agent=agent,
+                evaluator=evaluator,
+                developer=developer,
+                source=source,
+                problem=problem,
+                cycle=cycles / CYCLE_TEMPLATE.format(index),
+                pool=pool,
+                history=tuple(history),
+                config=config,
+                scratch_root=scratch_root,
+            )
+            records.append(record)
+            history.append(record.world)
+        return Run(
+            cycles=tuple(records),
+            policies=tuple(deployed),
+            policy=source,
+            pool=pool.names(),
+            stats=pool.stats(),
+        )
 
 
 def _check_manifest(path: Path, manifest: RunManifest, cycles: Path) -> None:
@@ -1002,28 +1011,36 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(unsupported, file=sys.stderr)
         return EXIT_REFUSED
 
-    run = run_cycles(
-        agent=ToySearchAgent(script=TOY_SCRIPT),
-        evaluator=ToySearchEvaluator(),
-        developer=FakeDeveloper(script=TOY_REVISIONS),
-        policy=DEFAULT_POLICY_SOURCE,
-        problem=TOY_PROBLEM,
-        directory=args.directory,
-        config=RunConfig(
-            cycles=args.cycles,
-            rollout=RolloutConfig(workers=args.workers, max_rounds=args.rounds, seed=args.seed),
-            # The width a version is offered while dreaming is the width the next
-            # rollout will actually run at, or Equation 1's parallelism term
-            # rewards batching the online loop cannot spend (``dream.DreamConfig``).
-            # The seed is the run's, and unlike the rollout's it is not offset per
-            # cycle: replay reseeds each policy-world pair from it (§3), and two
-            # cycles dreaming over the same world have to score it the same way
-            # for their V^m to be comparable at all.
-            dreaming=DreamConfig(width=args.workers, seed=args.seed),
-            versions=args.versions,
-            pool=PoolConfig(limit=args.pool_limit, seed=args.seed),
-        ),
-    )
+    try:
+        run = run_cycles(
+            agent=ToySearchAgent(script=TOY_SCRIPT),
+            evaluator=ToySearchEvaluator(),
+            developer=FakeDeveloper(script=TOY_REVISIONS),
+            policy=DEFAULT_POLICY_SOURCE,
+            problem=TOY_PROBLEM,
+            directory=args.directory,
+            config=RunConfig(
+                cycles=args.cycles,
+                rollout=RolloutConfig(
+                    workers=args.workers, max_rounds=args.rounds, seed=args.seed
+                ),
+                # The width a version is offered while dreaming is the width the next
+                # rollout will actually run at, or Equation 1's parallelism term
+                # rewards batching the online loop cannot spend (``dream.DreamConfig``).
+                # The seed is the run's, and unlike the rollout's it is not offset per
+                # cycle: replay reseeds each policy-world pair from it (§3), and two
+                # cycles dreaming over the same world have to score it the same way
+                # for their V^m to be comparable at all.
+                dreaming=DreamConfig(width=args.workers, seed=args.seed),
+                versions=args.versions,
+                pool=PoolConfig(limit=args.pool_limit, seed=args.seed),
+            ),
+        )
+    except RunInUseError as exc:
+        # One line and a refusal, not a traceback: this is the expected answer to a
+        # second command on a directory a first is still running (issue #72).
+        print(exc, file=sys.stderr)
+        return EXIT_REFUSED
     print(run.to_text(), end="")
     return 0
 
