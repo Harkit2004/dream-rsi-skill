@@ -143,8 +143,11 @@ def _skill_directory(host: str, *, project: str | Path | None, home: str | Path 
             "opencode": (".config", "opencode", "skills"),
             "cursor": (".cursor", "skills"),
         }[host]
+        # The ambient environment applies to the real home only: an explicit ``home``
+        # is a caller saying where the user's files are, and must not be overridden by
+        # wherever this process happens to be running.
         configured = os.environ.get("XDG_CONFIG_HOME")
-        if host == "opencode" and configured:
+        if host == "opencode" and configured and home is None:
             base, relative = Path(configured), ("opencode", "skills")
     return base.joinpath(*relative, SKILL_NAME)
 

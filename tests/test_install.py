@@ -43,6 +43,16 @@ PROJECT = {
 SKILL_FILES = {"SKILL.md", "references/method.md"}
 
 
+@pytest.fixture(autouse=True)
+def _hermetic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test here may depend on, or write to, the environment it happens to run in.
+
+    CI sets ``XDG_CONFIG_HOME``; a developer's shell often does not. A test that passed
+    on one and wrote to the real config directory on the other is what this prevents.
+    """
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+
 def _files(root: Path) -> set[str]:
     return {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
 
@@ -83,15 +93,27 @@ def test_installing_into_a_project_writes_only_inside_the_hosts_skill_directory(
     }
 
 
-def test_opencode_follows_xdg_config_home_for_the_user_global_directory(
+def test_opencode_follows_xdg_config_home_for_the_real_user_global_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = tmp_path / "elsewhere"
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+
+    written = install("opencode")
+
+    assert written == config / "opencode" / "skills" / SKILL_NAME
+
+
+def test_an_explicit_home_is_not_overridden_by_the_environment_the_process_runs_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "ambient"))
 
     written = install("opencode", home=tmp_path / "home")
 
-    assert written == config / "opencode" / "skills" / SKILL_NAME
+    assert written == tmp_path / "home" / ".config" / "opencode" / "skills" / SKILL_NAME
+    assert not (tmp_path / "ambient").exists()
 
 
 def test_the_installed_skill_is_the_one_source_file_and_loads_by_its_directory_name(
