@@ -64,7 +64,3 @@ python -m dream_rsi.run --cycles 3 runs/loop   # the toy task, no model calls
 ```
 
 A run writes one directory per cycle, each holding that cycle's tree, the policy it deployed, the policy it selected, and a record written last of all. The record is what says a cycle finished: running the same directory again resumes from the cycles it finds, so a crash in cycle 5 costs cycle 5 and not cycles 1–4. The report at the end prices each half of every cycle separately — discovery-agent calls online against model calls and revealed nodes offline — because the paper's claim is the ratio between them, not a single total.
-
-## Working on this repo
-
-Read [AGENTS.md](AGENTS.md) before changing anything. Test first, minimal diff, and mark every place the paper is silent with `PAPER-GAP:`.
