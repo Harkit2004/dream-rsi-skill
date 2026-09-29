@@ -14,6 +14,9 @@ called.
   and *then* exits 4.  ``hang``: never returns.
 * ``no-file``: exits 0 having written nothing.  ``empty``: writes an empty file.
   ``symlink``: makes the answer a symlink to ``--revision`` instead of a file.
+* ``unreadable``: writes the revision, then takes away every permission on it.
+  ``fifo``: makes the answer a named pipe nobody writes to. ``directory``: makes it a
+  directory.
 
 What it saw goes to a JSON file in ``$STAND_IN_LOG`` when that is set.
 """
@@ -63,12 +66,21 @@ def main() -> int:
         # A model with a shell can do this: point the answer at a file elsewhere.
         output.symlink_to(args.revision)
         return 0
+    if args.mode == "directory":
+        output.mkdir()
+        return 0
+    if args.mode == "fifo":
+        # Opening this for reading blocks until a writer appears, which nobody will be.
+        os.mkfifo(output)
+        return 0
     if args.mode == "empty":
         output.write_text("", encoding="utf-8")
     elif args.mode == "prose":
         output.write_text("I would suggest widening the batch and stopping earlier.\n")
     else:
         output.write_text(Path(args.revision).read_text(encoding="utf-8"), encoding="utf-8")
+    if args.mode == "unreadable":
+        output.chmod(0)
     if args.mode == "write-then-fail":
         print("crashed after writing", file=sys.stderr)
         return 4
