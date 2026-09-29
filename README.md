@@ -65,6 +65,45 @@ under `policy:` is the loop working; the `cost split` line is what it cost.
 
 Running the same command again resumes: cycles with a record are read back, not redone.
 
+## Install as a skill
+
+Two commands leave a coding agent able to load `dream-rsi` by name. The skill (`SKILL.md`)
+and the Python the agent will call (`dream_rsi`) are separate things, so there are two steps:
+
+```bash
+pip install git+https://github.com/Harkit2004/dream-rsi-skill   # the package the agent runs
+python -m dream_rsi.install --host claude                        # the skill directory
+```
+
+`--host` is `claude`, `opencode` or `cursor`. The command writes a thin skill directory —
+`SKILL.md` and `references/method.md`, the one file it links, and nothing else — to the
+host's **user-global** skills directory, and prints the path it wrote:
+
+| Host | user-global (default) | `--project DIR` |
+|---|---|---|
+| Claude Code | `~/.claude/skills/dream-rsi/` | `DIR/.claude/skills/dream-rsi/` |
+| OpenCode | `~/.config/opencode/skills/dream-rsi/` | `DIR/.opencode/skills/dream-rsi/` |
+| Cursor | `~/.cursor/skills/dream-rsi/` | `DIR/.cursor/skills/dream-rsi/` |
+
+User-global is the default on purpose. A project-local copy sits inside the host project, so
+its own formatters, linters and protected-path rules apply to it. For the same reason, don't
+clone this repo into a skills directory: that puts `src/`, `tests/`, the paper's PDF and CI
+config inside the host project, and its gates then fail on them.
+
+An existing skill directory that differs from what would be written (a local edit, or a
+whole-repo clone) is refused unless you pass `--force`; one that is already identical is left
+alone.
+
+Check that the host sees it. OpenCode: `opencode debug skill` lists `dream-rsi`. Claude Code
+and Cursor list skills at the start of a new session. The loop itself needs Linux or macOS
+(on Windows, WSL), as the [Quickstart](#quickstart) says.
+
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) before changing anything: test first, minimal diff, and mark every
+place the paper is silent with `PAPER-GAP:`. [CLAUDE.md](CLAUDE.md) adds the Claude-Code-specific
+bits.
+
 ## Status
 
 Phases 0–4 have landed and the loop runs end to end — run the [Quickstart](#quickstart) above to see it. The [issues](../../issues) hold what remains. Issues labelled `blocked` have open blockers: don't start them, because the interfaces they depend on aren't settled.
