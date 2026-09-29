@@ -23,6 +23,7 @@ packages = ["src/dream_rsi"]
 [tool.hatch.build.targets.wheel.force-include]
 "SKILL.md" = "dream_rsi/skill/SKILL.md"
 "references/method.md" = "dream_rsi/skill/references/method.md"
+"references/task_template.py" = "dream_rsi/skill/references/task_template.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

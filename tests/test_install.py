@@ -40,7 +40,7 @@ PROJECT = {
     "cursor": ".cursor/skills",
 }
 
-SKILL_FILES = {"SKILL.md", "references/method.md"}
+SKILL_FILES = {"SKILL.md", "references/method.md", "references/task_template.py"}
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +273,7 @@ def test_a_wheel_built_from_the_repo_carries_the_skill_and_installs_from_it(
         names = set(archive.namelist())
         assert "dream_rsi/skill/SKILL.md" in names
         assert "dream_rsi/skill/references/method.md" in names
+        assert "dream_rsi/skill/references/task_template.py" in names
         assert archive.read("dream_rsi/skill/SKILL.md") == (REPO / "SKILL.md").read_bytes()
         assert not [name for name in names if name.startswith(("tests/", ".github/"))]
         assert not [name for name in names if name.endswith(".pdf")]
