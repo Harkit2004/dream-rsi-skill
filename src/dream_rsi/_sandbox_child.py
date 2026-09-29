@@ -54,7 +54,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import resource
 import sys
 from typing import Any
 
@@ -233,6 +232,12 @@ def _is_write(mode: Any, flags: Any) -> bool:
 
 def _install_limits(limits: dict[str, Any], scratch: str) -> None:
     """Apply every layer, before any candidate code exists to see it happen."""
+    # Imported here and not at the top of the module: ``resource`` is POSIX-only,
+    # and ``dream_rsi.sandbox`` imports this module for a constant, so a top-level
+    # import made the whole package unimportable on Windows (issue #67). Nothing
+    # calls this function except the child process, which only starts on POSIX.
+    import resource
+
     cpu = int(limits["cpu_seconds"])
     memory = int(limits["memory_bytes"])
     disk = int(limits["disk_bytes"])

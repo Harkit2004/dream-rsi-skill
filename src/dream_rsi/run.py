@@ -61,6 +61,7 @@ import argparse
 import difflib
 import json
 import shutil
+import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
@@ -83,7 +84,12 @@ from dream_rsi.orchestrator import (
     run_rollout,
 )
 from dream_rsi.pool import PoolConfig, PoolStats, SimulatorPool, subsample
-from dream_rsi.sandbox import DEFAULT_LIMITS, SandboxedPolicy, SandboxLimits
+from dream_rsi.sandbox import (
+    DEFAULT_LIMITS,
+    SandboxedPolicy,
+    SandboxLimits,
+    unsupported_platform,
+)
 from dream_rsi.tree import DiscoveryTree
 from dream_rsi.workspace import SnapshotStore
 
@@ -91,6 +97,7 @@ __all__ = [
     "CYCLES_DIRNAME",
     "CYCLE_TEMPLATE",
     "DEFAULT_POLICY_SOURCE",
+    "EXIT_REFUSED",
     "MANIFEST_FILENAME",
     "NEXT_POLICY_FILENAME",
     "POLICY_FILENAME",
@@ -109,6 +116,12 @@ __all__ = [
 
 CYCLES_DIRNAME = "cycles"
 CYCLE_TEMPLATE = "cycle_{:03d}"
+
+# The command's exit statuses. A command refused before it ran anything — a platform
+# with no sandbox, and the refusals issues #68 and #72 add — exits with the status
+# ``argparse`` already uses for a command it will not run, so a caller can tell
+# "did not start" from a run that started and failed.
+EXIT_REFUSED = 2
 
 # Where the run keeps ℋ: one tree per finished cycle, under the cycle's name.
 POOL_DIRNAME = "pool"
@@ -980,6 +993,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="dream over at most this many worlds a cycle (default: the whole pool)",
     )
     args = parser.parse_args(argv)
+
+    # One line and a non-zero exit, before anything is created or run: policy code
+    # only ever runs in the POSIX sandbox, so a platform without it is refused here
+    # rather than left to fail on a stdlib import (issue #67).
+    unsupported = unsupported_platform()
+    if unsupported is not None:
+        print(unsupported, file=sys.stderr)
+        return EXIT_REFUSED
 
     run = run_cycles(
         agent=ToySearchAgent(script=TOY_SCRIPT),
