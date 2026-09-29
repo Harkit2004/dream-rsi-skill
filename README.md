@@ -194,6 +194,7 @@ Phases 0–4 have landed and the loop runs end to end — run the [Quickstart](#
 | 3 — Dream | Policy interface, dreaming sweep, sandbox, refinement, selection | [#10](../../issues/10)–[#15](../../issues/15) | landed |
 | 4 — Loop | The full RSI driver, pool management, cost accounting | [#16](../../issues/16)–[#18](../../issues/18) | landed |
 | 5 — Surface | Skill description, quickstart, grid planning, validation | [#19](../../issues/19)–[#23](../../issues/23) | in progress |
+| 6 — Harness | Usable as a skill inside an agent harness: run your own task, command-backed roles, install, workflow | [#66](../../issues/66)–[#77](../../issues/77) | in progress |
 
 Run the [Quickstart](#quickstart) to see the loop work, or read [SKILL.md](SKILL.md) for the skill interface. [Open issues](../../issues) are what's left.
 
