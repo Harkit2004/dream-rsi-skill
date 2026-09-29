@@ -80,7 +80,17 @@ __all__ = [
     "SandboxLimits",
     "SandboxedPolicy",
     "sandboxed_candidate",
+    "unsupported_platform",
 ]
+
+# ``os.name`` as this module reads it: one indirection, so a test can stand in for
+# another platform without patching ``os`` itself, which ``pathlib`` reads.
+_OS_NAME = os.name
+
+_POSIX_ONLY = (
+    "the Dream-RSI loop needs Linux or macOS (on Windows, use WSL): the sandbox that "
+    "runs policy code relies on POSIX resource limits and process groups"
+)
 
 # Drop the working directory — the scratch directory — off the child's import
 # path, so a candidate cannot shadow a module by writing a file it is allowed to
@@ -159,6 +169,19 @@ class SandboxLimits:
 DEFAULT_LIMITS = SandboxLimits()
 
 
+def unsupported_platform() -> str | None:
+    """Why this platform cannot run the sandbox, or ``None`` where it can.
+
+    The sandbox is POSIX by design (:mod:`dream_rsi._sandbox_child`), and it is not
+    something to fall back from: policy code is model-written, and running it
+    without its limits is exactly what CLAUDE.md rules out. So a platform without
+    them is refused, in words that name the requirement (issue #67), rather than
+    left to fail on whichever stdlib module it happens to lack first. A Windows
+    sandbox on Job Objects would be its own piece of work.
+    """
+    return None if _OS_NAME == "posix" else _POSIX_ONLY
+
+
 class SandboxError(RuntimeError):
     """A candidate policy did not produce a decision, and why.
 
@@ -213,6 +236,12 @@ class SandboxedPolicy:
         scratch_root: str | Path | None = None,
         policy_name: str = DEFAULT_POLICY_NAME,
     ) -> None:
+        # Before anything is created: a platform that cannot sandbox leaves no
+        # scratch directory behind, and the refusal is a ``SandboxError`` like
+        # every other way a candidate fails to decide (issue #67).
+        unsupported = unsupported_platform()
+        if unsupported is not None:
+            raise SandboxError(unsupported)
         self._limits = limits
         self._dead: str | None = None
         self._home = Path(

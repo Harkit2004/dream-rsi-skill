@@ -57,6 +57,8 @@ V   = mean of V_i over the worlds in H_t
 
 ## Running it
 
+The loop needs **Linux or macOS** — on Windows, run it under WSL. Policy code is model-written and runs in a sandbox built on POSIX resource limits, so `python -m dream_rsi.run` refuses to start elsewhere rather than run it unbounded.
+
 ```bash
 python -m dream_rsi.run --cycles 3 runs/loop   # the toy task, no model calls
 ```
