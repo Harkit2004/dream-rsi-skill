@@ -134,7 +134,7 @@ def test_a_task_file_that_cannot_supply_a_task_stops_the_command_before_any_cycl
     code = _main(tmp_path, "--task", str(path))
 
     err = capsys.readouterr().err
-    assert code != 0
+    assert code == run.EXIT_REFUSED
     assert str(path) in err
     assert named in err
     assert "Traceback" not in err
@@ -149,7 +149,7 @@ def test_a_missing_task_file_is_named_and_stops_the_command(
     code = _main(tmp_path, "--task", str(missing))
 
     err = capsys.readouterr().err
-    assert code != 0
+    assert code == run.EXIT_REFUSED
     assert str(missing) in err
     assert not (tmp_path / "run").exists()
 
@@ -173,7 +173,7 @@ def test_a_run_directory_is_not_resumed_under_a_different_task(
     code = run.main(["--cycles", "2", "--rounds", "2", "--task", str(second), str(tmp_path / "run")])
 
     err = capsys.readouterr().err
-    assert code != 0
+    assert code == run.EXIT_REFUSED
     assert "problem" in err
     assert "Traceback" not in err
     after = [
