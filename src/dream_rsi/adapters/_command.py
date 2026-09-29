@@ -40,6 +40,7 @@ __all__ = [
     "DEFAULT_MAX_OUTPUT_BYTES",
     "TAIL_BYTES",
     "CommandOutcome",
+    "is_inside",
     "run_command",
     "tail_of",
     "tail_of_file",
@@ -129,7 +130,23 @@ def run_command(
             # the failure this guards against, and the group is the only handle on
             # everything it started.
             _kill_group(process)
+        # Measured once more now it is over: a command that floods and exits between
+        # two polls must not get through on winning a race.
+        exceeded = exceeded or os.fstat(sink.fileno()).st_size > max_output_bytes
         return CommandOutcome(status=status, output=_tail(sink), exceeded=exceeded)
+
+
+def is_inside(root: str | Path, path: str | Path) -> bool:
+    """Whether ``path`` stays under ``root`` once every symlink on it is followed.
+
+    A workspace is resumed from a snapshot, snapshots keep symlinks, and the agent
+    that made them is a model with a shell — so a path in a workspace may lead anywhere,
+    and anything the *harness* reads or writes through one uses the harness's
+    permissions rather than the agent's. Resolved without needing the path to exist, so
+    a link to somewhere that is not there yet, the usual way to write outside a
+    directory, is caught as well.
+    """
+    return Path(path).resolve().is_relative_to(Path(root).resolve())
 
 
 def tail_of(text: str) -> str:

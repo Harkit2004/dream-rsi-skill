@@ -52,6 +52,7 @@ from pathlib import Path, PurePath
 from dream_rsi.adapters._command import (
     DEFAULT_MAX_OUTPUT_BYTES,
     CommandOutcome,
+    is_inside,
     run_command,
     tail_of_file,
 )
@@ -146,11 +147,22 @@ class CommandEvaluator:
         """Write ``artifact`` into ``workspace``, run the command there, read what it left."""
         workspace = Path(workspace)
         target = workspace / self.artifact_name
+        reports = workspace / SCORE_PATH.parent
+        # Everything this writes or removes is checked first: a symlink an earlier
+        # attempt left would make it write through to somewhere else, with the
+        # harness's permissions rather than the agent's (see ``is_inside``).
+        for path in (target, reports):
+            if not is_inside(workspace, path):
+                return EvalResult.failed(
+                    f"{path.relative_to(workspace)} resolves outside the workspace, so the "
+                    "harness will not write through it",
+                    fail_class=EVAL_ERROR,
+                )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(artifact, encoding="utf-8")
         # Stale results out first (see the module docstring), and the directory the
         # command reports into made, so a command need not create it.
-        (workspace / SCORE_PATH).parent.mkdir(parents=True, exist_ok=True)
+        reports.mkdir(parents=True, exist_ok=True)
         for stale in (workspace / SCORE_PATH, workspace / ERROR_PATH):
             stale.unlink(missing_ok=True)
 

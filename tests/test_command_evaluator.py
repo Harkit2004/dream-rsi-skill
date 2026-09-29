@@ -266,6 +266,69 @@ def test_a_scorer_that_prints_without_end_is_stopped_before_it_fills_the_disk(
     assert len(result.diagnostics) < 10_000
 
 
+def test_a_scorer_that_floods_and_exits_at_once_still_breaks_the_output_limit(
+    tmp_path: Path,
+) -> None:
+    """The cap must not depend on winning a race with the first poll.
+
+    This command is finished before anything measures it, and has written a valid score.
+    """
+    body = """
+        sys.stdout.write("x" * 2_000_000)
+        Path("eval/score.json").write_text('{"score": 1.0, "correct": true}')
+    """
+    evaluator = CommandEvaluator(
+        _scorer(tmp_path, body), HIGHER, timeout=QUICK, max_output_bytes=1024 * 1024
+    )
+
+    result = evaluator.evaluate("candidate\n", _workspace(tmp_path))
+
+    assert not result.evaluated
+    assert result.score is None
+    assert result.fail_class == OUTPUT_LIMIT
+
+
+@pytest.mark.parametrize("escaping", ["artifact", "eval-directory"])
+def test_the_harness_does_not_write_through_a_symlink_a_previous_attempt_left(
+    tmp_path: Path, escaping: str
+) -> None:
+    """A workspace is resumed from a snapshot, and snapshots keep symlinks.
+
+    The discovery agent is a model with a shell. If it leaves ``solution.py`` — or
+    ``eval/`` — pointing outside the workspace, the harness would overwrite or delete a
+    file it has no business touching, with its own permissions rather than the agent's.
+    """
+    workspace = _workspace(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "precious.txt").write_text("keep me\n", encoding="utf-8")
+    (outside / "score.json").write_text("keep me too\n", encoding="utf-8")
+    if escaping == "artifact":
+        (workspace / "solution.py").symlink_to(outside / "precious.txt")
+    else:
+        (workspace / "eval").symlink_to(outside, target_is_directory=True)
+    evaluator = CommandEvaluator(_scorer(tmp_path, LINE_COUNT), HIGHER, timeout=QUICK)
+
+    result = evaluator.evaluate("overwrite attempt\n", workspace)
+
+    assert not result.evaluated
+    assert result.error is not None and "outside the workspace" in result.error
+    assert (outside / "precious.txt").read_text(encoding="utf-8") == "keep me\n"
+    assert (outside / "score.json").read_text(encoding="utf-8") == "keep me too\n"
+
+
+def test_a_symlink_that_stays_inside_the_workspace_is_fine(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    (workspace / "real").mkdir()
+    (workspace / "solution.py").symlink_to(workspace / "real" / "actual.py")
+    evaluator = CommandEvaluator(_scorer(tmp_path, LINE_COUNT), HIGHER, timeout=QUICK)
+
+    result = evaluator.evaluate("a\nb\nc\nd\n", workspace)
+
+    assert result.evaluated
+    assert (workspace / "real" / "actual.py").read_text(encoding="utf-8") == "a\nb\nc\nd\n"
+
+
 def test_an_error_file_far_larger_than_anyone_reads_is_read_only_at_its_tail(
     tmp_path: Path,
 ) -> None:
