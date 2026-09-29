@@ -15,7 +15,9 @@ The coding agent underneath is never modified. All self-improvement happens in t
 Three cycles of the loop on a toy search task: pick the `(width, depth)` plan with the
 best throughput inside a cost budget. No API key, no provider and no network — the
 discovery agent is scripted and the policy-development agent answers from a list, so
-what runs is the orchestration layer and nothing else. From a clean checkout, after
+what runs is the orchestration layer and nothing else. It needs **Linux or macOS** (on
+Windows, use WSL): policy code runs in a POSIX sandbox with resource limits, and the
+command refuses to start on a platform without one. From a clean checkout, after
 `pip install -e .`:
 
 ```bash

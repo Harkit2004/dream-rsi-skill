@@ -85,7 +85,12 @@ from dream_rsi.orchestrator import (
     run_rollout,
 )
 from dream_rsi.pool import PoolConfig, PoolStats, SimulatorPool, subsample
-from dream_rsi.sandbox import DEFAULT_LIMITS, SandboxedPolicy, SandboxLimits
+from dream_rsi.sandbox import (
+    DEFAULT_LIMITS,
+    SandboxedPolicy,
+    SandboxLimits,
+    unsupported_platform,
+)
 from dream_rsi.tree import DiscoveryTree
 from dream_rsi.workspace import SnapshotStore
 
@@ -997,6 +1002,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="dream over at most this many worlds a cycle (default: the whole pool)",
     )
     args = parser.parse_args(argv)
+
+    # One line and a non-zero exit, before anything is created or run: policy code
+    # only ever runs in the POSIX sandbox, so a platform without it is refused here
+    # rather than left to fail on a stdlib import (issue #67).
+    unsupported = unsupported_platform()
+    if unsupported is not None:
+        print(unsupported, file=sys.stderr)
+        return EXIT_REFUSED
 
     try:
         run = run_cycles(
