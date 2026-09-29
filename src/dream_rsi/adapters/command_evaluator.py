@@ -160,11 +160,23 @@ class CommandEvaluator:
         """Write ``artifact`` into ``workspace``, run the command there, read what it left."""
         workspace = Path(workspace)
         target = workspace / self.artifact_name
+        reports = workspace / SCORE_PATH.parent
+        # A workspace is resumed from a snapshot, and snapshots keep symlinks, so a
+        # path in it may lead anywhere — and the agent that made it is a model with a
+        # shell. Everything this writes or removes is checked first: writing through a
+        # link would use the harness's permissions, not the agent's.
+        for path in (target, reports):
+            if not _inside(workspace, path):
+                return EvalResult.failed(
+                    f"{path.relative_to(workspace)} resolves outside the workspace, so the "
+                    "harness will not write through it",
+                    fail_class=EVAL_ERROR,
+                )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(artifact, encoding="utf-8")
         # Stale results out first (see the module docstring), and the directory the
         # command reports into made, so a command need not create it.
-        (workspace / SCORE_PATH).parent.mkdir(parents=True, exist_ok=True)
+        reports.mkdir(parents=True, exist_ok=True)
         for stale in (workspace / SCORE_PATH, workspace / ERROR_PATH):
             stale.unlink(missing_ok=True)
 
@@ -230,6 +242,9 @@ class CommandEvaluator:
                 except (ProcessLookupError, PermissionError):
                     pass
                 process.wait()
+            # Measured once more now it is over: a command that floods and exits
+            # between two polls must not get through on winning a race.
+            exceeded = exceeded or os.fstat(sink.fileno()).st_size > self.max_output_bytes
             return status, _tail(sink), exceeded
 
     def _read(self, workspace: Path, status: int, output: str) -> EvalResult:
@@ -301,6 +316,15 @@ def _malformed(reason: str, output: str) -> EvalResult:
     return EvalResult.failed(
         reason, fail_class=MALFORMED_SCORE, diagnostics=_with_output(reason, output)
     )
+
+
+def _inside(root: Path, path: Path) -> bool:
+    """Whether ``path`` stays under ``root`` once every symlink on it is followed.
+
+    Resolved without needing the path to exist, so a link to somewhere that is not
+    there yet — the usual way to write outside a directory — is caught as well.
+    """
+    return path.resolve().is_relative_to(root.resolve())
 
 
 def _with_output(text: str, output: str) -> str:
