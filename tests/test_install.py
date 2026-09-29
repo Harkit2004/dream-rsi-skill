@@ -216,6 +216,33 @@ def test_force_over_a_symlink_replaces_the_link_and_leaves_what_it_pointed_at(
     assert _files(target) == SKILL_FILES
 
 
+def test_a_directory_of_symlinked_files_is_not_taken_for_the_thin_install(
+    tmp_path: Path,
+) -> None:
+    """Links into a checkout carry the right bytes today and follow the checkout tomorrow.
+
+    The install is meant to be standalone, so it must not decide it is already there
+    because the files it would write can be *read* through links.
+    """
+    checkout = tmp_path / "checkout"
+    target = tmp_path / USER_GLOBAL["claude"] / SKILL_NAME
+    for name in SKILL_FILES:
+        (checkout / name).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / name).write_bytes((REPO / name).read_bytes())
+        (target / name).parent.mkdir(parents=True, exist_ok=True)
+        (target / name).symlink_to(checkout / name)
+
+    with pytest.raises(InstallError, match="--force"):
+        install("claude", home=tmp_path)
+    install("claude", home=tmp_path, force=True)
+
+    assert not any((target / name).is_symlink() for name in SKILL_FILES)
+    assert {name: (checkout / name).read_bytes() for name in SKILL_FILES} == {
+        name: (REPO / name).read_bytes() for name in SKILL_FILES
+    }
+    assert _files(target) == SKILL_FILES
+
+
 def test_the_command_prints_the_path_it_wrote_and_refuses_in_one_line(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
