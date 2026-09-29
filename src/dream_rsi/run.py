@@ -91,6 +91,7 @@ from dream_rsi.sandbox import (
     SandboxLimits,
     unsupported_platform,
 )
+from dream_rsi.task import DEFAULT_POLICY_SOURCE, Task, TaskError, load_task
 from dream_rsi.tree import DiscoveryTree
 from dream_rsi.workspace import SnapshotStore
 
@@ -161,25 +162,6 @@ TOY_SCRIPT = (
     plan_source(0, 2),
     plan_source(4, 0),
 )
-
-# π_1 for a run that is not handed one: the §B.2 shape, "keep NAME =
-# "OptimalPolicy" and implement class OptimalPolicy(...)", over a baseline the
-# package already ships. A real run supplies its own.
-#
-# Breadth-first deliberately: it is §4's Recursive Fixed Exploration, the
-# paper's own controlled baseline — "10 parallel workspaces with up to 11
-# refinement steps", a grid opened whatever it finds — so a run that starts
-# there and improves on it is the comparison the paper reports. It is also the
-# baseline with the most room above it, since Equation 1 charges it for every
-# node of that grid. Starting from a policy nothing on offer can beat is a loop
-# that runs correctly and demonstrates nothing (issue #20).
-DEFAULT_POLICY_SOURCE = """\
-from dream_rsi.policy import BreadthFirstPolicy
-
-
-class OptimalPolicy(BreadthFirstPolicy):
-    pass
-"""
 
 # What the stub development agent offers against it: §B.2's "dynamic portfolio",
 # at the three settings of the one knob a version exposes. It is a different
@@ -972,9 +954,31 @@ def _write_record(path: Path, record: CycleRecord) -> None:
     durable.publish(staging, path)
 
 
+def _toy_task() -> Task:
+    """The task ``main`` runs without ``--task``: scripted on both sides, no model."""
+    return Task(
+        agent=ToySearchAgent(script=TOY_SCRIPT),
+        evaluator=ToySearchEvaluator(),
+        developer=FakeDeveloper(script=TOY_REVISIONS),
+        problem=TOY_PROBLEM,
+        policy=DEFAULT_POLICY_SOURCE,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the loop on the toy task, with no model on either side of it."""
-    parser = argparse.ArgumentParser(description="Run the Dream-RSI loop on the toy task.")
+    """Run the loop on a task file's task, or on the toy task with no model in it."""
+    parser = argparse.ArgumentParser(
+        description="Run the Dream-RSI loop on your own task (--task), or on the toy task."
+    )
+    parser.add_argument(
+        "--task",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="a Python file defining task() that returns a dream_rsi.task.Task: the "
+        "discovery agent, evaluator, policy-development agent and problem to run "
+        "(default: the toy task)",
+    )
     parser.add_argument(
         "directory",
         nargs="?",
@@ -1011,13 +1015,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(unsupported, file=sys.stderr)
         return EXIT_REFUSED
 
+    # Before anything is created: a task file that cannot supply a task stops the
+    # command with the file and the reason, and no cycle starts (issue #68).
+    try:
+        task = _toy_task() if args.task is None else load_task(args.task)
+    except TaskError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_REFUSED
+
     try:
         run = run_cycles(
-            agent=ToySearchAgent(script=TOY_SCRIPT),
-            evaluator=ToySearchEvaluator(),
-            developer=FakeDeveloper(script=TOY_REVISIONS),
-            policy=DEFAULT_POLICY_SOURCE,
-            problem=TOY_PROBLEM,
+            agent=task.agent,
+            evaluator=task.evaluator,
+            developer=task.developer,
+            policy=task.policy,
+            problem=task.problem,
             directory=args.directory,
             config=RunConfig(
                 cycles=args.cycles,
@@ -1036,9 +1048,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 pool=PoolConfig(limit=args.pool_limit, seed=args.seed),
             ),
         )
-    except RunInUseError as exc:
-        # One line and a refusal, not a traceback: this is the expected answer to a
-        # second command on a directory a first is still running (issue #72).
+    except (RunInUseError, RunError) as exc:
+        # One line and a refusal, not a traceback: a directory another run holds
+        # (issue #72), or one this task may not be appended to (issue #45), is the
+        # expected answer to running the command again.
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
     print(run.to_text(), end="")
