@@ -13,6 +13,7 @@ called.
 * ``fail``: prints to stderr and exits 3.  ``write-then-fail``: writes the revision
   and *then* exits 4.  ``hang``: never returns.
 * ``no-file``: exits 0 having written nothing.  ``empty``: writes an empty file.
+  ``symlink``: makes the answer a symlink to ``--revision`` instead of a file.
 
 What it saw goes to a JSON file in ``$STAND_IN_LOG`` when that is set.
 """
@@ -58,6 +59,10 @@ def main() -> int:
     if args.mode == "no-file":
         return 0
     output = Path("revised_policy.py")
+    if args.mode == "symlink":
+        # A model with a shell can do this: point the answer at a file elsewhere.
+        output.symlink_to(args.revision)
+        return 0
     if args.mode == "empty":
         output.write_text("", encoding="utf-8")
     elif args.mode == "prose":

@@ -48,6 +48,7 @@ from pathlib import Path
 
 from dream_rsi.adapters._command import (
     DEFAULT_MAX_OUTPUT_BYTES,
+    is_inside,
     run_command,
     tail_of,
 )
@@ -154,6 +155,14 @@ class CommandDeveloper:
                     _failure(f"the command exited with status {outcome.status}", outcome.output)
                 )
             output = directory / OUTPUT_FILENAME
+            # The CLI had a shell in this directory, so the answer may be a link to any
+            # file the harness can read — which would then be recorded as the policy
+            # and shown to the next attempt. A refusal, like any other unusable answer.
+            if not is_inside(directory, output):
+                raise RevisionFailed(
+                    f"{OUTPUT_FILENAME} resolves outside the scratch directory, so the "
+                    "harness will not read through it"
+                )
             revision = ""
             if output.is_file():
                 revision = output.read_text(encoding="utf-8", errors="replace")

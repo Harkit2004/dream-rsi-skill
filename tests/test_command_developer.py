@@ -229,6 +229,24 @@ def test_a_revision_is_never_run_by_the_adapter(tmp_path: Path, log: Path) -> No
     assert not escaped.exists()
 
 
+def test_an_answer_that_is_a_symlink_to_somewhere_else_is_not_read_through(
+    tmp_path: Path, log: Path
+) -> None:
+    """The CLI has a shell in the scratch directory, and the harness reads what it left.
+
+    Following a link would pull any file the harness can read into the recorded policy
+    source — and into the next prompt — so it is a refusal like any other unusable answer.
+    """
+    secret = tmp_path / "secret.txt"
+    secret.write_text(REVISION, encoding="utf-8")  # legal source, so only the link is wrong
+    developer = _developer("--mode", "symlink", "--revision", str(secret))
+
+    report = _develop(developer, tmp_path, attempts=1)
+
+    assert [version.name for version in report.versions] == ["v0"]
+    assert "outside" in report.rejected[0].reason
+
+
 def test_a_command_is_an_argv_list_because_there_is_no_shell_to_split_a_string() -> None:
     with pytest.raises(TypeError, match="argv list"):
         CommandDeveloper("claude -p")  # type: ignore[arg-type]
