@@ -45,16 +45,17 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import signal
-import subprocess
-import tempfile
-import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import IO
 
+from dream_rsi.adapters._command import (
+    DEFAULT_MAX_OUTPUT_BYTES,
+    CommandOutcome,
+    is_inside,
+    run_command,
+    tail_of_file,
+)
 from dream_rsi.adapters.evaluator import EvalResult, ScoreDirection
 
 __all__ = [
@@ -81,20 +82,6 @@ EVAL_ERROR = "eval_error"
 NO_SCORE = "no_score"
 MALFORMED_SCORE = "malformed_score"
 OUTPUT_LIMIT = "output_limit"
-
-# How much of the command's output, and of an error file, goes into a result: the
-# tail, since a record is read to find out why the command stopped. The same bound
-# ``sandbox`` puts on a failed candidate's output.
-_TAIL_BYTES = 4096
-
-# How often a running command's output is measured. It is what stops a scorer that
-# prints without end: the output goes to a file, which has no size of its own.
-_POLL_SECONDS = 0.25
-
-# PAPER-GAP: the paper says nothing about a scorer that misbehaves. The default cap
-# is the one ``sandbox.SandboxLimits`` puts on what a policy may write: far more than
-# a scorer that is working prints, and small next to the disk it would otherwise fill.
-_DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 # PAPER-GAP: the paper says nothing about how long an evaluation may run. Its
 # evaluations are compilations, benchmarks and long runs (§1), so a limit tight
@@ -136,7 +123,7 @@ class CommandEvaluator:
     baseline_score: float | None = None
     timeout: float = _DEFAULT_TIMEOUT
     artifact_name: str = "solution.py"
-    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES
+    max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
 
     def __post_init__(self) -> None:
         if isinstance(self.command, str) or not self.command:
@@ -161,12 +148,11 @@ class CommandEvaluator:
         workspace = Path(workspace)
         target = workspace / self.artifact_name
         reports = workspace / SCORE_PATH.parent
-        # A workspace is resumed from a snapshot, and snapshots keep symlinks, so a
-        # path in it may lead anywhere — and the agent that made it is a model with a
-        # shell. Everything this writes or removes is checked first: writing through a
-        # link would use the harness's permissions, not the agent's.
+        # Everything this writes or removes is checked first: a symlink an earlier
+        # attempt left would make it write through to somewhere else, with the
+        # harness's permissions rather than the agent's (see ``is_inside``).
         for path in (target, reports):
-            if not _inside(workspace, path):
+            if not is_inside(workspace, path):
                 return EvalResult.failed(
                     f"{path.relative_to(workspace)} resolves outside the workspace, so the "
                     "harness will not write through it",
@@ -181,85 +167,47 @@ class CommandEvaluator:
             stale.unlink(missing_ok=True)
 
         try:
-            status, output, exceeded = self._run(workspace)
+            outcome = run_command(
+                self.command,
+                cwd=workspace,
+                timeout=self.timeout,
+                max_output_bytes=self.max_output_bytes,
+            )
         except OSError as exc:
             # The command could not be started at all — not on the path, not
             # executable — which is the task's wiring and not the candidate.
             return EvalResult.failed(
                 f"could not run {self.command[0]!r}: {exc.strerror or exc}", fail_class=EVAL_ERROR
             )
-        if exceeded:
+        if outcome.exceeded:
             reason = f"printed more than {self.max_output_bytes} bytes and was stopped"
             return EvalResult.failed(
-                reason, fail_class=OUTPUT_LIMIT, diagnostics=_with_output(reason, output)
+                reason,
+                fail_class=OUTPUT_LIMIT,
+                diagnostics=_with_output(reason, outcome.output),
             )
-        if status is None:
+        if outcome.status is None:
+            timed_out = f"timed out after {self.timeout:g}s"
             return EvalResult.failed(
-                f"timed out after {self.timeout:g}s",
+                timed_out,
                 fail_class=TIMEOUT,
-                diagnostics=_with_output(f"timed out after {self.timeout:g}s", output),
+                diagnostics=_with_output(timed_out, outcome.output),
             )
-        return self._read(workspace, status, output)
+        return self._read(workspace, outcome)
 
-    def _run(self, workspace: Path) -> tuple[int | None, str, bool]:
-        """Run the command; return its exit status, the tail of its output, and whether it flooded.
-
-        The status is ``None`` for a command that outlived ``timeout`` or was stopped
-        for printing more than ``max_output_bytes`` (the third element says which).
-        Output goes to a file, not a pipe: a pipe is held open by everything the
-        command started, so a benchmark that left a child behind would keep this
-        waiting past the kill, and a pipe buffers all of it in memory besides. The
-        command gets its own process group so the kill reaches its children too, and
-        it is measured while it runs because a file, unlike a pipe, grows until the
-        disk is full.
-        """
-        with tempfile.TemporaryFile() as sink:
-            process = subprocess.Popen(
-                list(self.command),
-                cwd=workspace,
-                stdin=subprocess.DEVNULL,
-                stdout=sink,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            status: int | None = None
-            exceeded = False
-            started = time.monotonic()
-            try:
-                while (left := self.timeout - (time.monotonic() - started)) > 0:
-                    try:
-                        status = process.wait(timeout=min(_POLL_SECONDS, left))
-                        break
-                    except subprocess.TimeoutExpired:
-                        if os.fstat(sink.fileno()).st_size > self.max_output_bytes:
-                            exceeded = True
-                            break
-            finally:
-                # Whatever ended the wait — and after a clean exit too, since a command
-                # that started children and left them is a leak.
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                process.wait()
-            # Measured once more now it is over: a command that floods and exits
-            # between two polls must not get through on winning a race.
-            exceeded = exceeded or os.fstat(sink.fileno()).st_size > self.max_output_bytes
-            return status, _tail(sink), exceeded
-
-    def _read(self, workspace: Path, status: int, output: str) -> EvalResult:
+    def _read(self, workspace: Path, outcome: CommandOutcome) -> EvalResult:
         """What the command reported: an error, a score, or nothing at all."""
+        output = outcome.output
         error_file = workspace / ERROR_PATH
         if error_file.is_file():
-            with error_file.open("rb") as handle:
-                error = _tail(handle)
+            error = tail_of_file(error_file)
             return EvalResult.failed(
                 error or "the command wrote an empty eval/error.txt",
                 fail_class=EVAL_ERROR,
                 diagnostics=_with_output(error, output),
             )
-        if status != 0:
-            error = f"the command exited with status {status}"
+        if outcome.status != 0:
+            error = f"the command exited with status {outcome.status}"
             return EvalResult.failed(
                 error, fail_class=EVAL_ERROR, diagnostics=_with_output(error, output)
             )
@@ -318,25 +266,8 @@ def _malformed(reason: str, output: str) -> EvalResult:
     )
 
 
-def _inside(root: Path, path: Path) -> bool:
-    """Whether ``path`` stays under ``root`` once every symlink on it is followed.
-
-    Resolved without needing the path to exist, so a link to somewhere that is not
-    there yet — the usual way to write outside a directory — is caught as well.
-    """
-    return path.resolve().is_relative_to(root.resolve())
-
-
 def _with_output(text: str, output: str) -> str:
     """``text``, then the command's output under a heading, where it printed any."""
     if not output:
         return text
     return f"{text}\n--- command output (tail) ---\n{output}" if text else output
-
-
-def _tail(handle: IO[bytes]) -> str:
-    """The last :data:`_TAIL_BYTES` of ``handle``, without reading the rest of it."""
-    handle.seek(0, os.SEEK_END)
-    size = handle.tell()
-    handle.seek(max(0, size - _TAIL_BYTES))
-    return handle.read().decode("utf-8", errors="replace").strip()
