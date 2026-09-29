@@ -45,15 +45,11 @@ from __future__ import annotations
 
 import json
 import math
-import os
-import signal
-import subprocess
-import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
-from typing import IO
 
+from dream_rsi.adapters._command import CommandOutcome, run_command, tail_of
 from dream_rsi.adapters.evaluator import EvalResult, ScoreDirection
 
 __all__ = [
@@ -78,11 +74,6 @@ TIMEOUT = "timeout"
 EVAL_ERROR = "eval_error"
 NO_SCORE = "no_score"
 MALFORMED_SCORE = "malformed_score"
-
-# How much of the command's output, and of an error file, goes into a result: the
-# tail, since a record is read to find out why the command stopped. The same bound
-# ``sandbox`` puts on a failed candidate's output.
-_TAIL_BYTES = 4096
 
 # PAPER-GAP: the paper says nothing about how long an evaluation may run. Its
 # evaluations are compilations, benchmarks and long runs (§1), so a limit tight
@@ -153,62 +144,35 @@ class CommandEvaluator:
             stale.unlink(missing_ok=True)
 
         try:
-            status, output = self._run(workspace)
+            outcome = run_command(self.command, cwd=workspace, timeout=self.timeout)
         except OSError as exc:
             # The command could not be started at all — not on the path, not
             # executable — which is the task's wiring and not the candidate.
             return EvalResult.failed(
                 f"could not run {self.command[0]!r}: {exc.strerror or exc}", fail_class=EVAL_ERROR
             )
-        if status is None:
+        if outcome.status is None:
+            timed_out = f"timed out after {self.timeout:g}s"
             return EvalResult.failed(
-                f"timed out after {self.timeout:g}s",
+                timed_out,
                 fail_class=TIMEOUT,
-                diagnostics=_with_output(f"timed out after {self.timeout:g}s", output),
+                diagnostics=_with_output(timed_out, outcome.output),
             )
-        return self._read(workspace, status, output)
+        return self._read(workspace, outcome)
 
-    def _run(self, workspace: Path) -> tuple[int | None, str]:
-        """Run the command, and return its exit status and the tail of its output.
-
-        The status is ``None`` for a command that outlived ``timeout``. Output goes
-        to a file, not a pipe: a pipe is held open by everything the command
-        started, so a benchmark that left a child behind would keep this waiting
-        past the kill, and a pipe buffers all of it in memory besides. The command
-        gets its own process group so the kill reaches its children too.
-        """
-        with tempfile.TemporaryFile() as sink:
-            process = subprocess.Popen(
-                list(self.command),
-                cwd=workspace,
-                stdin=subprocess.DEVNULL,
-                stdout=sink,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-            try:
-                status: int | None = process.wait(timeout=self.timeout)
-            except subprocess.TimeoutExpired:
-                status = None
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:  # exited between the timeout and the kill
-                    pass
-                process.wait()
-            return status, _tail(sink)
-
-    def _read(self, workspace: Path, status: int, output: str) -> EvalResult:
+    def _read(self, workspace: Path, outcome: CommandOutcome) -> EvalResult:
         """What the command reported: an error, a score, or nothing at all."""
+        output = outcome.output
         error_file = workspace / ERROR_PATH
         if error_file.is_file():
-            error = _tail_of(error_file.read_text(encoding="utf-8", errors="replace"))
+            error = tail_of(error_file.read_text(encoding="utf-8", errors="replace"))
             return EvalResult.failed(
                 error or "the command wrote an empty eval/error.txt",
                 fail_class=EVAL_ERROR,
                 diagnostics=_with_output(error, output),
             )
-        if status != 0:
-            error = f"the command exited with status {status}"
+        if outcome.status != 0:
+            error = f"the command exited with status {outcome.status}"
             return EvalResult.failed(
                 error, fail_class=EVAL_ERROR, diagnostics=_with_output(error, output)
             )
@@ -264,16 +228,3 @@ def _with_output(text: str, output: str) -> str:
     if not output:
         return text
     return f"{text}\n--- command output (tail) ---\n{output}" if text else output
-
-
-def _tail(sink: IO[bytes]) -> str:
-    """The last :data:`_TAIL_BYTES` of what the command wrote to ``sink``."""
-    sink.seek(0, os.SEEK_END)
-    size = sink.tell()
-    sink.seek(max(0, size - _TAIL_BYTES))
-    return sink.read().decode("utf-8", errors="replace").strip()
-
-
-def _tail_of(text: str) -> str:
-    """The last :data:`_TAIL_BYTES` characters of ``text``, stripped."""
-    return text[-_TAIL_BYTES:].strip()
