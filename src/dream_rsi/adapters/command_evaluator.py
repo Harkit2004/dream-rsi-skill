@@ -49,6 +49,7 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath
@@ -61,6 +62,7 @@ __all__ = [
     "EVAL_ERROR",
     "MALFORMED_SCORE",
     "NO_SCORE",
+    "OUTPUT_LIMIT",
     "SCORE_PATH",
     "TIMEOUT",
     "CommandEvaluator",
@@ -78,11 +80,21 @@ TIMEOUT = "timeout"
 EVAL_ERROR = "eval_error"
 NO_SCORE = "no_score"
 MALFORMED_SCORE = "malformed_score"
+OUTPUT_LIMIT = "output_limit"
 
 # How much of the command's output, and of an error file, goes into a result: the
 # tail, since a record is read to find out why the command stopped. The same bound
 # ``sandbox`` puts on a failed candidate's output.
 _TAIL_BYTES = 4096
+
+# How often a running command's output is measured. It is what stops a scorer that
+# prints without end: the output goes to a file, which has no size of its own.
+_POLL_SECONDS = 0.25
+
+# PAPER-GAP: the paper says nothing about a scorer that misbehaves. The default cap
+# is the one ``sandbox.SandboxLimits`` puts on what a policy may write: far more than
+# a scorer that is working prints, and small next to the disk it would otherwise fill.
+_DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 # PAPER-GAP: the paper says nothing about how long an evaluation may run. Its
 # evaluations are compilations, benchmarks and long runs (§1), so a limit tight
@@ -112,7 +124,8 @@ class CommandEvaluator:
     * a non-zero exit, or ``eval/error.txt``: a failed result carrying the error
       text. Either wins over a score file. Exit 0 with neither file is a failure.
     * the tail of its stdout and stderr is appended to the diagnostics either way.
-    * outliving ``timeout`` is a failure with ``fail_class`` :data:`TIMEOUT`.
+    * outliving ``timeout`` is a failure with ``fail_class`` :data:`TIMEOUT`, and
+      printing more than ``max_output_bytes`` is one with :data:`OUTPUT_LIMIT`.
 
     Nothing the command does raises: a bad score file is a failed result too.
     The module docstring has the reasoning.
@@ -123,6 +136,7 @@ class CommandEvaluator:
     baseline_score: float | None = None
     timeout: float = _DEFAULT_TIMEOUT
     artifact_name: str = "solution.py"
+    max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES
 
     def __post_init__(self) -> None:
         if isinstance(self.command, str) or not self.command:
@@ -134,6 +148,8 @@ class CommandEvaluator:
             raise TypeError(f"command must be a list of strings, got {self.command!r}")
         if self.timeout <= 0:
             raise ValueError(f"timeout must be positive, got {self.timeout}")
+        if self.max_output_bytes <= 0:
+            raise ValueError(f"max_output_bytes must be positive, got {self.max_output_bytes}")
         name = PurePath(self.artifact_name)
         if not self.artifact_name or name.is_absolute() or ".." in name.parts:
             raise ValueError(
@@ -153,12 +169,17 @@ class CommandEvaluator:
             stale.unlink(missing_ok=True)
 
         try:
-            status, output = self._run(workspace)
+            status, output, exceeded = self._run(workspace)
         except OSError as exc:
             # The command could not be started at all — not on the path, not
             # executable — which is the task's wiring and not the candidate.
             return EvalResult.failed(
                 f"could not run {self.command[0]!r}: {exc.strerror or exc}", fail_class=EVAL_ERROR
+            )
+        if exceeded:
+            reason = f"printed more than {self.max_output_bytes} bytes and was stopped"
+            return EvalResult.failed(
+                reason, fail_class=OUTPUT_LIMIT, diagnostics=_with_output(reason, output)
             )
         if status is None:
             return EvalResult.failed(
@@ -168,14 +189,17 @@ class CommandEvaluator:
             )
         return self._read(workspace, status, output)
 
-    def _run(self, workspace: Path) -> tuple[int | None, str]:
-        """Run the command, and return its exit status and the tail of its output.
+    def _run(self, workspace: Path) -> tuple[int | None, str, bool]:
+        """Run the command; return its exit status, the tail of its output, and whether it flooded.
 
-        The status is ``None`` for a command that outlived ``timeout``. Output goes
-        to a file, not a pipe: a pipe is held open by everything the command
-        started, so a benchmark that left a child behind would keep this waiting
-        past the kill, and a pipe buffers all of it in memory besides. The command
-        gets its own process group so the kill reaches its children too.
+        The status is ``None`` for a command that outlived ``timeout`` or was stopped
+        for printing more than ``max_output_bytes`` (the third element says which).
+        Output goes to a file, not a pipe: a pipe is held open by everything the
+        command started, so a benchmark that left a child behind would keep this
+        waiting past the kill, and a pipe buffers all of it in memory besides. The
+        command gets its own process group so the kill reaches its children too, and
+        it is measured while it runs because a file, unlike a pipe, grows until the
+        disk is full.
         """
         with tempfile.TemporaryFile() as sink:
             process = subprocess.Popen(
@@ -186,22 +210,34 @@ class CommandEvaluator:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            status: int | None = None
+            exceeded = False
+            started = time.monotonic()
             try:
-                status: int | None = process.wait(timeout=self.timeout)
-            except subprocess.TimeoutExpired:
-                status = None
+                while (left := self.timeout - (time.monotonic() - started)) > 0:
+                    try:
+                        status = process.wait(timeout=min(_POLL_SECONDS, left))
+                        break
+                    except subprocess.TimeoutExpired:
+                        if os.fstat(sink.fileno()).st_size > self.max_output_bytes:
+                            exceeded = True
+                            break
+            finally:
+                # Whatever ended the wait — and after a clean exit too, since a command
+                # that started children and left them is a leak.
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:  # exited between the timeout and the kill
+                except (ProcessLookupError, PermissionError):
                     pass
                 process.wait()
-            return status, _tail(sink)
+            return status, _tail(sink), exceeded
 
     def _read(self, workspace: Path, status: int, output: str) -> EvalResult:
         """What the command reported: an error, a score, or nothing at all."""
         error_file = workspace / ERROR_PATH
         if error_file.is_file():
-            error = _tail_of(error_file.read_text(encoding="utf-8", errors="replace"))
+            with error_file.open("rb") as handle:
+                error = _tail(handle)
             return EvalResult.failed(
                 error or "the command wrote an empty eval/error.txt",
                 fail_class=EVAL_ERROR,
@@ -233,8 +269,16 @@ def _parse_score(path: Path, output: str) -> EvalResult:
     score = payload.get("score")
     # ``bool`` is an ``int``, and a scorer that wrote ``true`` for its score has not
     # measured anything.
-    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
         return _malformed(f'eval/score.json needs a finite number "score", got {score!r}', output)
+    try:
+        number = float(score)
+    except OverflowError:  # a JSON integer has no size limit and a float does
+        number = math.inf
+    if not math.isfinite(number):
+        return _malformed(
+            f'eval/score.json needs a finite number "score", got {str(score)[:40]}', output
+        )
     correct = payload.get("correct")
     if not isinstance(correct, bool):
         return _malformed(f'eval/score.json needs a boolean "correct", got {correct!r}', output)
@@ -246,7 +290,7 @@ def _parse_score(path: Path, output: str) -> EvalResult:
         return _malformed(f'"diagnostics" must be a string, got {diagnostics!r}', output)
 
     return EvalResult(
-        score=float(score),
+        score=number,
         correct=correct,
         diagnostics=_with_output(diagnostics, output),
         fail_class=fail_class,
@@ -266,14 +310,9 @@ def _with_output(text: str, output: str) -> str:
     return f"{text}\n--- command output (tail) ---\n{output}" if text else output
 
 
-def _tail(sink: IO[bytes]) -> str:
-    """The last :data:`_TAIL_BYTES` of what the command wrote to ``sink``."""
-    sink.seek(0, os.SEEK_END)
-    size = sink.tell()
-    sink.seek(max(0, size - _TAIL_BYTES))
-    return sink.read().decode("utf-8", errors="replace").strip()
-
-
-def _tail_of(text: str) -> str:
-    """The last :data:`_TAIL_BYTES` characters of ``text``, stripped."""
-    return text[-_TAIL_BYTES:].strip()
+def _tail(handle: IO[bytes]) -> str:
+    """The last :data:`_TAIL_BYTES` of ``handle``, without reading the rest of it."""
+    handle.seek(0, os.SEEK_END)
+    size = handle.tell()
+    handle.seek(max(0, size - _TAIL_BYTES))
+    return handle.read().decode("utf-8", errors="replace").strip()
