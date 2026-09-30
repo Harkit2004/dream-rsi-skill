@@ -172,7 +172,7 @@ def test_a_run_directory_is_not_resumed_under_a_different_task(
     tells one task from another, so a second task file under the directory the
     first one ran in is refused, naming the field — and appends nothing.
     """
-    first = _task_file(tmp_path, problem="minimise the first thing", name="first.py")
+    first = _task_file(tmp_path, name="first.py")
     second = _task_file(tmp_path, name="second.py", **change)
     assert _main(tmp_path, "--task", str(first)) == 0
     capsys.readouterr()
