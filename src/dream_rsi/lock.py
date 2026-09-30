@@ -31,7 +31,7 @@ import os
 from pathlib import Path
 from types import TracebackType
 
-__all__ = ["LOCK_FILENAME", "RunInUseError", "RunLock"]
+__all__ = ["LOCK_FILENAME", "RunInUseError", "RunLock", "probe"]
 
 LOCK_FILENAME = "run.lock"
 
@@ -91,14 +91,51 @@ class RunLock:
             self._descriptor = None
 
 
-def _holder(descriptor: int) -> str:
-    """`` (pid N)`` for the process that wrote the lock file, or nothing legible.
+def probe(directory: str | Path) -> tuple[bool, int | None]:
+    """Whether a process holds ``directory``'s lock, and the pid it wrote, without writing.
+
+    For a report on a run that must never be able to disturb it (issue #73). The lock
+    file is opened read-only, and never created: a directory that has none is not
+    held; one that cannot be opened for another reason raises :class:`OSError`, because
+    not knowing whether it is held is not knowing that it is free. A shared lock is
+    tried and dropped at once, which is a lock a running
+    writer refuses and another prober does not.
+
+    The one cost of asking: for the moment that shared lock is held, a run that is
+    *starting* on this directory would be refused as "in use". That fails closed —
+    a run refused is a run not started — and the window is microseconds, which is
+    what a probe that never writes costs.
+    """
+    import fcntl
+
+    try:
+        descriptor = os.open(Path(directory) / LOCK_FILENAME, os.O_RDONLY)
+    except (FileNotFoundError, NotADirectoryError):
+        return False, None
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True, _pid(descriptor)
+        return False, None
+    finally:
+        os.close(descriptor)
+
+
+def _pid(descriptor: int) -> int | None:
+    """The pid the holder wrote into the lock file, or ``None`` if nothing legible.
 
     Read through the descriptor already open rather than the path: it is the file
-    the failed ``flock`` was about, and reading it changes nothing.
+    the ``flock`` was about, and reading it changes nothing.
     """
     try:
         text = os.pread(descriptor, 32, 0).decode("ascii", errors="replace").strip()
     except OSError:
-        return ""
-    return f" (pid {text})" if text.isdigit() else ""
+        return None
+    return int(text) if text.isdigit() else None
+
+
+def _holder(descriptor: int) -> str:
+    """`` (pid N)`` for the process that wrote the lock file, or nothing legible."""
+    pid = _pid(descriptor)
+    return "" if pid is None else f" (pid {pid})"

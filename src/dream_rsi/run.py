@@ -64,7 +64,7 @@ import shutil
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from itertools import accumulate
 from pathlib import Path
 from typing import Any
@@ -77,7 +77,7 @@ from dream_rsi.adapters.toy_search import ToySearchAgent, ToySearchEvaluator, pl
 from dream_rsi.cost import CycleCost, CycleTiming, DreamCost, total
 from dream_rsi.develop import DEFAULT_ATTEMPTS, PolicyDeveloper, develop
 from dream_rsi.dream import DEFAULT_VERSIONS, DreamConfig, Selection, select
-from dream_rsi.lock import RunInUseError, RunLock
+from dream_rsi.lock import RunInUseError, RunLock, probe
 from dream_rsi.orchestrator import (
     STORE_DIRNAME,
     TREE_FILENAME,
@@ -99,12 +99,16 @@ __all__ = [
     "CYCLES_DIRNAME",
     "CYCLE_TEMPLATE",
     "DEFAULT_POLICY_SOURCE",
+    "EXIT_FINISHED",
     "EXIT_REFUSED",
+    "EXIT_RUNNING",
+    "EXIT_STOPPED",
     "MANIFEST_FILENAME",
     "NEXT_POLICY_FILENAME",
     "POLICY_FILENAME",
     "POOL_DIRNAME",
     "RECORD_FILENAME",
+    "SESSION_FILENAME",
     "TIMING_FILENAME",
     "TOY_REVISIONS",
     "CycleRecord",
@@ -125,6 +129,14 @@ CYCLE_TEMPLATE = "cycle_{:03d}"
 # "did not start" from a run that started and failed.
 EXIT_REFUSED = 2
 
+# What ``--report`` exits with, so a harness agent can branch on it (issue #73):
+# 0 the run finished every cycle its last session asked for, 3 a process is running
+# it now, 4 nothing is running it and it stopped short, and ``EXIT_REFUSED`` the
+# directory is not a run directory at all.
+EXIT_FINISHED = 0
+EXIT_RUNNING = 3
+EXIT_STOPPED = 4
+
 # Where the run keeps ℋ: one tree per finished cycle, under the cycle's name.
 POOL_DIRNAME = "pool"
 
@@ -132,6 +144,12 @@ POOL_DIRNAME = "pool"
 # first of them runs. Beside ``cycles/`` and ``pool/`` rather than inside either:
 # it is a property of the whole run, not of one cycle or one tree.
 MANIFEST_FILENAME = "manifest.json"
+
+# How many cycles the latest session was asked for, written when it starts. The
+# manifest cannot hold it — resuming a two-cycle run with three is how a run
+# continues, not a different experiment — and without it a directory nothing is
+# running cannot be told apart between "finished" and "stopped short" (issue #73).
+SESSION_FILENAME = "session.json"
 
 # What one cycle leaves behind, beside the tree and round log
 # ``orchestrator.Rollout.save`` writes. ``RECORD_FILENAME`` is written last and
@@ -633,6 +651,9 @@ def run_cycles(
             RunManifest.from_config(config, policy=policy, problem=problem),
             cycles,
         )
+        # After the manifest check, so a session that is refused leaves what the
+        # last one asked for as it was (issue #73).
+        _write(directory / SESSION_FILENAME, json.dumps({"cycles": config.cycles}) + "\n")
 
         records, deployed, source = _resume(cycles, config.cycles, policy, pool)
         history = [record.world for record in records]
@@ -965,10 +986,100 @@ def _toy_task() -> Task:
     )
 
 
+def _is_run_directory(directory: Path, *, held: bool) -> bool:
+    """Whether ``directory`` holds a run, rather than files that happen to share a name.
+
+    A held lock is a run that has only just started, before it has written anything
+    else. Otherwise it takes something only a run writes: a finished cycle's record,
+    or a manifest with every field a run's manifest has. A stray ``manifest.json`` or
+    an empty ``cycles/`` is not one.
+    """
+    if held or _finished(directory / CYCLES_DIRNAME):
+        return True
+    manifest = directory / MANIFEST_FILENAME
+    if not manifest.is_file():
+        return False
+    try:
+        payload = _read_manifest(manifest)
+    except RunError:
+        return False
+    return {item.name for item in fields(RunManifest)} <= set(payload)
+
+
+def _requested(directory: Path) -> int | None:
+    """How many cycles the latest session was asked for, or ``None`` if nothing says."""
+    try:
+        return int(json.loads((directory / SESSION_FILENAME).read_text(encoding="utf-8"))["cycles"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _report(directory: Path) -> int:
+    """Say how the run in ``directory`` is doing, without starting a cycle or writing a file.
+
+    What a harness agent polls (issue #73): a run outlasts a tool call, so it is
+    launched detached and checked on later, and asking must not be able to advance,
+    duplicate or corrupt it. Everything here reads — :meth:`Run.load`, the lock's
+    :func:`~dream_rsi.lock.probe`, the session record — and the exit status says which
+    of four things is true (see ``EXIT_FINISHED``).
+
+    "Running" is a process holding the directory's lock and nothing else: a pid in a
+    file could be stale, and the lock is the operating system's. "Stopped short" is
+    nothing holding it while fewer cycles are on disk than the last session asked for.
+    A directory that recorded no request (one from before sessions did) and is not held
+    is reported finished, because nothing says otherwise.
+    """
+    try:
+        held, pid = probe(directory)
+        if not _is_run_directory(directory, held=held):
+            print(
+                f"{directory} is not a run directory: nothing a run leaves is there",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
+        run = Run.load(directory)
+        requested = _requested(directory)
+        held, pid = probe(directory)
+        if not held:
+            # What was read may be a snapshot of a run that was still going and has
+            # since let go. With nothing holding it, nothing is changing it: read it
+            # again, and look once more in case another session took it meanwhile.
+            run = Run.load(directory)
+            requested = _requested(directory)
+            held, pid = probe(directory)
+    except RunError as exc:
+        print(exc, file=sys.stderr)
+        return EXIT_REFUSED
+    except OSError as exc:
+        print(f"cannot report on {directory}: {exc.strerror or exc}", file=sys.stderr)
+        return EXIT_REFUSED
+
+    done = len(run.cycles)
+    if held:
+        holder = "" if pid is None else f", pid {pid}"
+        status, code = f"status: running (cycle {done} in progress{holder})", EXIT_RUNNING
+    elif requested is not None and done < requested:
+        status = f"status: stopped in cycle {done}: {done} of {requested} cycle(s) finished"
+        code = EXIT_STOPPED
+    else:
+        status, code = f"status: finished ({done} cycle(s))", EXIT_FINISHED
+    print(status)
+    print()
+    print(run.to_text(), end="")
+    return code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the loop on a task file's task, or on the toy task with no model in it."""
     parser = argparse.ArgumentParser(
         description="Run the Dream-RSI loop on your own task (--task), or on the toy task."
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print how the run in DIRECTORY is doing and exit, without starting a cycle or "
+        "writing anything: exit 0 finished, 3 running now, 4 stopped short, 2 not a run "
+        "directory",
     )
     parser.add_argument(
         "--task",
@@ -1014,6 +1125,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if unsupported is not None:
         print(unsupported, file=sys.stderr)
         return EXIT_REFUSED
+
+    if args.report:
+        return _report(args.directory)
 
     # Before anything is created: a task file that cannot supply a task stops the
     # command with the file and the reason, and no cycle starts (issue #68).

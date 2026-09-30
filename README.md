@@ -92,6 +92,28 @@ the exploration *policies* the loop writes are model-written and run only in the
 A run directory is tied to its `problem` text and starting policy, so resuming it under a
 different task is refused. Without `--task` the command runs the toy task above, unchanged.
 
+## Checking on a run
+
+A real run outlasts a tool call, so launch it detached and check on it from a later one.
+Running the command again would *resume* it, so ask for a report instead:
+
+```bash
+python -m dream_rsi.run --report runs/mine
+```
+
+It prints the run's report, headed by a `status:` line, and never starts a cycle or writes
+to the directory. The exit status says which of four things is true:
+
+| Exit | Meaning |
+|---|---|
+| `0` | finished: every cycle the last session asked for is on disk |
+| `3` | running: a process holds the directory now (the status line names its cycle and pid) |
+| `4` | stopped short: nothing is running it and fewer cycles are on disk than were asked for |
+| `2` | not a run directory |
+
+Only one process may write to a run directory at a time; a second `python -m dream_rsi.run`
+on a directory another is running is refused with exit `2`.
+
 ## Install as a skill
 
 Two commands leave a coding agent able to load `dream-rsi` by name. The skill (`SKILL.md`)
