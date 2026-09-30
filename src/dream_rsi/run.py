@@ -64,7 +64,7 @@ import shutil
 import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from itertools import accumulate
 from pathlib import Path
 from typing import Any
@@ -77,7 +77,7 @@ from dream_rsi.adapters.toy_search import ToySearchAgent, ToySearchEvaluator, pl
 from dream_rsi.cost import CycleCost, CycleTiming, DreamCost, total
 from dream_rsi.develop import DEFAULT_ATTEMPTS, PolicyDeveloper, develop
 from dream_rsi.dream import DEFAULT_VERSIONS, DreamConfig, Selection, select
-from dream_rsi.lock import LOCK_FILENAME, RunInUseError, RunLock, probe
+from dream_rsi.lock import RunInUseError, RunLock, probe
 from dream_rsi.orchestrator import (
     STORE_DIRNAME,
     TREE_FILENAME,
@@ -986,17 +986,24 @@ def _toy_task() -> Task:
     )
 
 
-def _is_run_directory(directory: Path) -> bool:
-    """Whether ``directory`` has anything a run leaves there.
+def _is_run_directory(directory: Path, *, held: bool) -> bool:
+    """Whether ``directory`` holds a run, rather than files that happen to share a name.
 
-    Any one of them: a run creates its lock, then its ``cycles/`` and its manifest, so
-    a run that has only just started is a run directory, and an unrelated directory
-    — or one that does not exist — is not.
+    A held lock is a run that has only just started, before it has written anything
+    else. Otherwise it takes something only a run writes: a finished cycle's record,
+    or a manifest with every field a run's manifest has. A stray ``manifest.json`` or
+    an empty ``cycles/`` is not one.
     """
-    return any(
-        (directory / name).exists()
-        for name in (LOCK_FILENAME, MANIFEST_FILENAME, SESSION_FILENAME, CYCLES_DIRNAME)
-    )
+    if held or _finished(directory / CYCLES_DIRNAME):
+        return True
+    manifest = directory / MANIFEST_FILENAME
+    if not manifest.is_file():
+        return False
+    try:
+        payload = _read_manifest(manifest)
+    except RunError:
+        return False
+    return {item.name for item in fields(RunManifest)} <= set(payload)
 
 
 def _requested(directory: Path) -> int | None:
@@ -1022,18 +1029,32 @@ def _report(directory: Path) -> int:
     A directory that recorded no request (one from before sessions did) and is not held
     is reported finished, because nothing says otherwise.
     """
-    if not _is_run_directory(directory):
-        print(f"{directory} is not a run directory: nothing a run leaves is there", file=sys.stderr)
-        return EXIT_REFUSED
     try:
+        held, pid = probe(directory)
+        if not _is_run_directory(directory, held=held):
+            print(
+                f"{directory} is not a run directory: nothing a run leaves is there",
+                file=sys.stderr,
+            )
+            return EXIT_REFUSED
         run = Run.load(directory)
+        requested = _requested(directory)
+        held, pid = probe(directory)
+        if not held:
+            # What was read may be a snapshot of a run that was still going and has
+            # since let go. With nothing holding it, nothing is changing it: read it
+            # again, and look once more in case another session took it meanwhile.
+            run = Run.load(directory)
+            requested = _requested(directory)
+            held, pid = probe(directory)
     except RunError as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
+    except OSError as exc:
+        print(f"cannot report on {directory}: {exc.strerror or exc}", file=sys.stderr)
+        return EXIT_REFUSED
 
     done = len(run.cycles)
-    requested = _requested(directory)
-    held, pid = probe(directory)
     if held:
         holder = "" if pid is None else f", pid {pid}"
         status, code = f"status: running (cycle {done} in progress{holder})", EXIT_RUNNING
