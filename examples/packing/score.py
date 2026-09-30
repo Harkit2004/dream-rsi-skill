@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -75,7 +77,10 @@ def evaluate(program: Path, timeout: float = TIMEOUT_SECONDS) -> float:
     with tempfile.TemporaryDirectory(prefix="packing-score-") as scratch:
         out_path, err_path = Path(scratch) / "stdout", Path(scratch) / "stderr"
         with out_path.open("wb") as out, err_path.open("wb") as err:
-            process = subprocess.Popen([sys.executable, str(program)], stdout=out, stderr=err)
+            # Its own process group, so whatever it starts is ended with it.
+            process = subprocess.Popen(
+                [sys.executable, str(program)], stdout=out, stderr=err, start_new_session=True
+            )
             try:
                 deadline = time.monotonic() + timeout
                 while process.poll() is None:
@@ -85,9 +90,7 @@ def evaluate(program: Path, timeout: float = TIMEOUT_SECONDS) -> float:
                         raise ValueError(f"solution.py timed out after {timeout:g}s")
                     time.sleep(0.02)
             finally:
-                if process.poll() is None:
-                    process.kill()
-                process.wait()
+                _end(process)
         if _too_much(out_path, err_path):
             raise ValueError(f"solution.py printed more than {OUTPUT_LIMIT} bytes")
         stdout = out_path.read_text(encoding="utf-8", errors="replace")
@@ -96,6 +99,21 @@ def evaluate(program: Path, timeout: float = TIMEOUT_SECONDS) -> float:
         tail = stderr.strip()[-500:]
         raise ValueError(f"solution.py exited with status {process.returncode}: {tail}")
     return min_distance(parse(stdout))
+
+
+def _end(process: subprocess.Popen[bytes]) -> None:
+    """Kill ``process`` and everything in its group, even if it has already exited itself.
+
+    Process groups are POSIX, as the loop is; elsewhere only the candidate is killed.
+    """
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+    process.wait()
 
 
 def _too_much(*paths: Path) -> bool:

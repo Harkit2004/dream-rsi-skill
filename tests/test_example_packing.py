@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -108,6 +109,33 @@ def test_an_invalid_answer_is_a_failed_evaluation_that_says_why(
     assert not result.evaluated
     assert result.score is None
     assert result.error is not None and named in result.error
+
+
+def test_nothing_a_candidate_started_outlives_its_scoring(tmp_path: Path) -> None:
+    """A candidate may start processes of its own; scoring it ends them too.
+
+    Run as the user would run the scorer, outside ``CommandEvaluator`` (whose own
+    process-group kill would otherwise hide the difference).
+    """
+    marker = tmp_path / "survived"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    leftover = f"import pathlib, time; time.sleep(2); pathlib.Path({str(marker)!r}).touch()"
+    (workspace / "solution.py").write_text(
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', {leftover!r}])\n"
+        + _program(STAGGERED),
+        encoding="utf-8",
+    )
+
+    scored = subprocess.run(
+        [sys.executable, str(SCORER)], cwd=workspace, capture_output=True, text=True, check=False
+    )
+    time.sleep(3)
+
+    assert scored.returncode == 0, scored.stderr
+    assert (workspace / "eval" / "score.json").is_file()
+    assert not marker.exists(), "a process the candidate started was still running"
 
 
 def _environment(monkeypatch: pytest.MonkeyPatch, *, agent: str = "packing") -> None:
