@@ -84,7 +84,7 @@ from dream_rsi.orchestrator import (
     RolloutConfig,
     run_rollout,
 )
-from dream_rsi.pool import PoolConfig, PoolStats, SimulatorPool, subsample
+from dream_rsi.pool import PoolConfig, PoolError, PoolStats, SimulatorPool, subsample
 from dream_rsi.sandbox import (
     DEFAULT_LIMITS,
     SandboxedPolicy,
@@ -910,6 +910,8 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RunError(f"a finished cycle is missing {path}: {exc}") from exc
+    except UnicodeError as exc:
+        raise RunError(f"{path} is not UTF-8 text: {exc}") from exc
 
 
 def _write(path: Path, text: str) -> None:
@@ -1047,7 +1049,7 @@ def _report(directory: Path) -> int:
             run = Run.load(directory)
             requested = _requested(directory)
             held, pid = probe(directory)
-    except RunError as exc:
+    except (RunError, PoolError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
     except OSError as exc:

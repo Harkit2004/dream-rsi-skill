@@ -29,6 +29,7 @@ from dream_rsi.run import (
     EXIT_RUNNING,
     EXIT_STOPPED,
     MANIFEST_FILENAME,
+    POOL_DIRNAME,
     SESSION_FILENAME,
 )
 
@@ -215,3 +216,24 @@ def test_a_run_that_finishes_while_it_is_being_read_is_reported_finished(
 
     assert code == EXIT_FINISHED, capsys.readouterr().out
     assert "status: finished (2 cycle(s))" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("damage", ["pool-tree", "policy-bytes"])
+def test_a_run_directory_with_a_damaged_file_is_refused_in_one_line(
+    tmp_path: Path, damage: str
+) -> None:
+    """A report is read by a program branching on its exit status: no traceback, exit 2."""
+    directory = tmp_path / "run"
+    _run(directory, 1)
+    if damage == "pool-tree":
+        [tree] = sorted((directory / POOL_DIRNAME).glob("*.json"))
+        tree.write_text("{not json", encoding="utf-8")
+    else:
+        [policy] = sorted((directory / CYCLES_DIRNAME).glob("*/policy.py"))
+        policy.write_bytes(b"\xff\xfe not utf-8\n")
+
+    reported = cli("--report", str(directory))
+
+    assert reported.returncode == EXIT_REFUSED
+    assert "Traceback" not in reported.stderr
+    assert reported.stderr.strip()

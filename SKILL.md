@@ -101,7 +101,7 @@ Start with one cycle and few workers, to learn what a run costs. A real run outl
 | `0` | finished | report back (step 5) |
 | `3` | running | wait, then poll again |
 | `4` | stopped short | read `runs/first.log`; rerunning the launch command resumes it |
-| `2` | not a run directory | it has not started yet (poll again in a moment) or the path is wrong |
+| `2` | not a run directory, or one that cannot be read | it may not have started yet: poll again once or twice over a few seconds. If it stays `2`, read `runs/first.log` — a task file that fails to load, or a refused launch, says why there — fix that and launch again; otherwise the report's own message says what it could not read |
 
 Only one process may write to a run directory at a time: a second launch on a directory another is running is refused, also with exit `2`.
 
