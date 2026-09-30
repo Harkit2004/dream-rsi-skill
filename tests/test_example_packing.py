@@ -115,27 +115,36 @@ def test_nothing_a_candidate_started_outlives_its_scoring(tmp_path: Path) -> Non
     """A candidate may start processes of its own; scoring it ends them too.
 
     Run as the user would run the scorer, outside ``CommandEvaluator`` (whose own
-    process-group kill would otherwise hide the difference).
+    process-group kill would otherwise hide the difference). The child marks that it
+    is running before the candidate answers, so the test cannot pass by the child
+    never having started.
     """
-    marker = tmp_path / "survived"
+    started, survived = tmp_path / "started", tmp_path / "survived"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    leftover = f"import pathlib, time; time.sleep(2); pathlib.Path({str(marker)!r}).touch()"
+    child = (
+        f"import pathlib, time; pathlib.Path({str(started)!r}).touch(); "
+        f"time.sleep(2); pathlib.Path({str(survived)!r}).touch()"
+    )
     (workspace / "solution.py").write_text(
-        "import subprocess, sys\n"
-        f"subprocess.Popen([sys.executable, '-c', {leftover!r}])\n"
-        + _program(STAGGERED),
+        "import pathlib, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+        f"while not pathlib.Path({str(started)!r}).exists():\n"
+        "    time.sleep(0.01)\n" + _program(STAGGERED),
         encoding="utf-8",
     )
 
     scored = subprocess.run(
         [sys.executable, str(SCORER)], cwd=workspace, capture_output=True, text=True, check=False
     )
-    time.sleep(3)
 
     assert scored.returncode == 0, scored.stderr
     assert (workspace / "eval" / "score.json").is_file()
-    assert not marker.exists(), "a process the candidate started was still running"
+    assert started.exists()
+    deadline = time.monotonic() + 4  # well past the child's two seconds
+    while time.monotonic() < deadline and not survived.exists():
+        time.sleep(0.05)
+    assert not survived.exists(), "a process the candidate started was still running"
 
 
 def _environment(monkeypatch: pytest.MonkeyPatch, *, agent: str = "packing") -> None:
