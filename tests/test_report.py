@@ -239,7 +239,19 @@ def test_a_run_directory_with_a_damaged_file_is_refused_in_one_line(
     assert reported.stderr.strip()
 
 
-@pytest.mark.parametrize("record", ["", '{"cycles": ', '{"cycles": "three"}', "[]"])
+@pytest.mark.parametrize(
+    "record",
+    [
+        "",
+        '{"cycles": ',
+        '{"cycles": "three"}',
+        "[]",
+        '{"cycles": true}',
+        '{"cycles": 2.5}',
+        '{"cycles": 0}',
+        '{"cycles": -1}',
+    ],
+)
 def test_a_session_record_that_cannot_be_read_is_refused_rather_than_taken_for_finished(
     tmp_path: Path, record: str
 ) -> None:

@@ -1026,9 +1026,14 @@ def _requested(directory: Path) -> int | None:
     except (OSError, UnicodeError) as exc:
         raise RunError(f"{path} is not a readable session record: {exc}") from exc
     try:
-        return int(json.loads(text)["cycles"])
-    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        cycles = json.loads(text)["cycles"]
+    except (ValueError, TypeError, KeyError) as exc:
         raise RunError(f"{path} is not a valid session record: {exc}") from exc
+    # ``bool`` is an ``int`` to Python and not a count to anyone: refused, with
+    # fractions and anything below one, rather than coerced into a cycle count.
+    if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
+        raise RunError(f"{path} is not a valid session record: cycles is {cycles!r}")
+    return cycles
 
 
 def _report(directory: Path) -> int:
