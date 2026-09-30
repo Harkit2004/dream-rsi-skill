@@ -114,6 +114,35 @@ to the directory. The exit status says which of four things is true:
 Only one process may write to a run directory at a time; a second `python -m dream_rsi.run`
 on a directory another is running is refused with exit `2`.
 
+## A real run
+
+The quickstart proves the orchestration layer with scripted roles on both sides.
+[`examples/packing`](examples/packing) is a task where a **model writes the candidates** and a
+**scorer measures something real**: place ten points in the unit square so that the two closest
+are as far apart as possible. A 4-by-3 grid scores `1/3`, a staggered arrangement `5/12`, and the
+best known is about `0.4213`. The scorer (`score.py`) is deterministic and takes well under a
+second, so a run's time and cost are the model's. It is in the spirit of §4's
+mathematical-optimization domain, and its budgets are far smaller than §4's (see the `PAPER-GAP:` in
+`task.py`), so its scores are not comparable to the paper's.
+
+With any coding-agent CLI that has a non-interactive mode, it is two commands:
+
+```bash
+export DREAM_RSI_AGENT_CMD="claude -p --permission-mode acceptEdits"   # your CLI; there is no default
+python -m dream_rsi.run --task examples/packing/task.py --cycles 2 --workers 3 --rounds 3 runs/packing
+```
+
+The variable is required: without it the example refuses to start and names it, because a default
+would be a provider chosen for you. Let the CLI edit files without asking, since the loop cannot
+answer a permission prompt. The run prints the report described above (`--report` checks on it),
+and its directory holds the model-driven tree, each cycle's policy, and the revision that was
+replayed, scored and selected or rejected.
+
+**No run against a real model has been recorded here yet.** What is tested is everything up to the
+CLI boundary: `tests/test_example_packing.py` drives this same `task.py` and `score.py` with
+stand-in CLIs. When one real run has been done, its report belongs in this section, labelled as one
+run and not a benchmark.
+
 ## Install as a skill
 
 Two commands leave a coding agent able to load `dream-rsi` by name. The skill (`SKILL.md`)
@@ -156,7 +185,7 @@ bits.
 
 ## Status
 
-Phases 0–4 have landed and the loop runs end to end — run the [Quickstart](#quickstart) above to see it. The [issues](../../issues) hold what remains. Issues labelled `blocked` have open blockers: don't start them, because the interfaces they depend on aren't settled.
+Phases 0–4 and 6 have landed and the loop runs end to end, on the toy task or on your own — run the [Quickstart](#quickstart) above to see it. The [issues](../../issues) hold what remains. Issues labelled `blocked` have open blockers: don't start them, because the interfaces they depend on aren't settled.
 
 | Phase | What lands | Issues | Status |
 |---|---|---|---|
@@ -166,6 +195,7 @@ Phases 0–4 have landed and the loop runs end to end — run the [Quickstart](#
 | 3 — Dream | Policy interface, dreaming sweep, sandbox, refinement, selection | [#10](../../issues/10)–[#15](../../issues/15) | landed |
 | 4 — Loop | The full RSI driver, pool management, cost accounting | [#16](../../issues/16)–[#18](../../issues/18) | landed |
 | 5 — Surface | Skill description, quickstart, grid planning, validation | [#19](../../issues/19)–[#23](../../issues/23) | in progress |
+| 6 — Harness | Usable as a skill inside an agent harness: run your own task, command-backed roles, install, workflow | [#66](../../issues/66)–[#77](../../issues/77) | landed; no real-model run recorded yet (see [A real run](#a-real-run)) |
 
 Run the [Quickstart](#quickstart) to see the loop work, or read [SKILL.md](SKILL.md) for the skill interface. [Open issues](../../issues) are what's left.
 

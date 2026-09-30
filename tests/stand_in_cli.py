@@ -15,6 +15,7 @@ renders, lists them in one sentence — ``Variables (`node`, `history`, `baselin
 
 * ``write`` (default): a proposal and a program, both naming the seed.
 * ``plan``: a program the toy task can score, ``PLAN = (width, depth)``.
+* ``packing``: a program the packing example can score (``examples/packing``).
 * ``fail``: prints to stderr and exits 3.  ``write-then-fail``: writes a good
   attempt and *then* exits 4.  ``hang``: never returns.  ``flood``: prints without
   end.
@@ -84,6 +85,16 @@ def main() -> int:
     elif args.mode == "plan":
         number = int(seed)
         program.write_text(f"PLAN = ({number % 5}, {(number // 5) % 5})\n", encoding="utf-8")
+    elif args.mode == "packing":
+        # A valid answer to examples/packing: ten seeded random points. Different seeds
+        # score differently, and none of them is any good, which is all a test needs.
+        program.write_text(
+            "import json\n"
+            "import random\n"
+            f"random.seed({int(seed)})\n"
+            "print(json.dumps([[random.random(), random.random()] for _ in range(10)]))\n",
+            encoding="utf-8",
+        )
     else:
         program.write_text(f"program for seed {seed}\n", encoding="utf-8")
     if args.mode == "write-then-fail":
