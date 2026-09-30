@@ -653,7 +653,11 @@ def run_cycles(
         )
         # After the manifest check, so a session that is refused leaves what the
         # last one asked for as it was (issue #73).
-        _write(directory / SESSION_FILENAME, json.dumps({"cycles": config.cycles}) + "\n")
+        session = directory / SESSION_FILENAME
+        # Staged and renamed, so a report never reads half a request.
+        staging = session.with_name(session.name + ".tmp")
+        _write(staging, json.dumps({"cycles": config.cycles}) + "\n")
+        durable.publish(staging, session)
 
         records, deployed, source = _resume(cycles, config.cycles, policy, pool)
         history = [record.world for record in records]
@@ -1009,11 +1013,22 @@ def _is_run_directory(directory: Path, *, held: bool) -> bool:
 
 
 def _requested(directory: Path) -> int | None:
-    """How many cycles the latest session was asked for, or ``None`` if nothing says."""
+    """How many cycles the latest session was asked for, or ``None`` if no session recorded it.
+
+    A record that is there but cannot be read is a :class:`RunError`: treating it as
+    absent would report a run that stopped short as finished.
+    """
+    path = directory / SESSION_FILENAME
     try:
-        return int(json.loads((directory / SESSION_FILENAME).read_text(encoding="utf-8"))["cycles"])
-    except (OSError, ValueError, TypeError, KeyError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
+    except (OSError, UnicodeError) as exc:
+        raise RunError(f"{path} is not a readable session record: {exc}") from exc
+    try:
+        return int(json.loads(text)["cycles"])
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise RunError(f"{path} is not a valid session record: {exc}") from exc
 
 
 def _report(directory: Path) -> int:

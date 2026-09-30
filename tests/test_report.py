@@ -237,3 +237,19 @@ def test_a_run_directory_with_a_damaged_file_is_refused_in_one_line(
     assert reported.returncode == EXIT_REFUSED
     assert "Traceback" not in reported.stderr
     assert reported.stderr.strip()
+
+
+@pytest.mark.parametrize("record", ["", '{"cycles": ', '{"cycles": "three"}', "[]"])
+def test_a_session_record_that_cannot_be_read_is_refused_rather_than_taken_for_finished(
+    tmp_path: Path, record: str
+) -> None:
+    """A half-written or damaged request must not make a run that stopped short look done."""
+    directory = tmp_path / "run"
+    _run(directory, 1)
+    (directory / SESSION_FILENAME).write_text(record, encoding="utf-8")
+
+    reported = cli("--report", str(directory))
+
+    assert reported.returncode == EXIT_REFUSED
+    assert SESSION_FILENAME in reported.stderr
+    assert "Traceback" not in reported.stderr
