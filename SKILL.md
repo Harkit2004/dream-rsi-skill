@@ -17,6 +17,8 @@ description: >-
 
 Self-improving exploration for expensive discovery tasks. The coding agent that writes candidate solutions is never modified — the thing that improves is the *policy deciding what to explore next*.
 
+> **Loading this skill runs nothing.** It tells you the method and how to drive it; the loop itself is the `dream_rsi` Python package, and you start it from a shell. On a task this fits, do not stop at reasoning about the method or writing a design document — follow "Running it" below and start a real run.
+
 ## When this applies
 
 Use it when all of these hold:
@@ -57,10 +59,61 @@ V   = mean of V_i over the worlds in H_t
 
 ## Running it
 
-The loop needs **Linux or macOS** — on Windows, run it under WSL. Policy code is model-written and runs in a sandbox built on POSIX resource limits, so `python -m dream_rsi.run` refuses to start elsewhere rather than run it unbounded.
+Follow these steps in order. Each exists because skipping it wastes a run.
+
+### 1. Check that it fits, and that there is a scorer
+
+Re-read "When this applies". If the task has no automatic scorer yet, **writing one comes first, and that is a question for the user**: what counts as a good result, and which way the number runs, is theirs to say and nothing here can guess it.
+
+A scorer is a command that reads the candidate from `solution.py` in its working directory and reports through files: it writes `eval/score.json` holding `{"score": <number>, "correct": <true|false>}`, or it exits non-zero (or writes `eval/error.txt`) to say the candidate failed.
+
+### 2. Check the prerequisites
 
 ```bash
-python -m dream_rsi.run --cycles 3 runs/loop   # the toy task, no model calls
+python -c "import dream_rsi"
+python -m dream_rsi.run --help
 ```
+
+The loop needs **Linux or macOS** — on Windows, run it under WSL. Policy code is model-written and runs in a sandbox built on POSIX resource limits, so `python -m dream_rsi.run` refuses to start elsewhere rather than run it unbounded. If `dream_rsi` does not import, install the package (`pip install git+https://github.com/Harkit2004/dream-rsi-skill`) and check again. Do not vendor the code, write your own loop, or run the method by hand in prose.
+
+### 3. Write the task file
+
+Copy `references/task_template.py` to `task.py` beside the user's scorer and fill in the three marked parts: `PROBLEM` (what is being optimised, and which way the score runs), `SCORER` (their command, as an argv list, with an absolute path to the script) and `DIRECTION`. The template builds the three roles:
+
+- the **discovery agent** is your own host's CLI in its non-interactive mode (`claude -p …`, `gemini -p …`, `opencode run`), named by the environment variable `DREAM_RSI_AGENT_CMD`. It must be allowed to edit files without asking, because the loop cannot answer a permission prompt;
+- the **evaluator** is the user's scorer, run in each candidate's workspace;
+- the **policy-development agent** is the same CLI, or the one in `DREAM_RSI_DEVELOPER_CMD`.
+
+Export the variable before a run, for example `export DREAM_RSI_AGENT_CMD="claude -p --permission-mode acceptEdits"`. The template refuses to start without it and says so.
+
+### 4. Run it small, detached, and poll
+
+```bash
+mkdir -p runs
+python -m dream_rsi.run --task task.py --cycles 1 --workers 2 --rounds 3 runs/first > runs/first.log 2>&1 &
+python -m dream_rsi.run --report runs/first
+```
+
+Start with one cycle and few workers, to learn what a run costs. A real run outlasts your tool call's timeout, so it is launched detached (the `&`) and checked on from a later call with `--report`. **Never rerun the launch command to see how it is going: that resumes the run.** `--report` prints the report under a `status:` line, never starts a cycle and never writes to the directory, and its exit status is the answer:
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| `0` | finished | report back (step 5) |
+| `3` | running | wait, then poll again |
+| `4` | stopped short | read `runs/first.log`; rerunning the launch command resumes it |
+| `2` | not a run directory, or one that cannot be read | it may not have started yet: poll again once or twice over a few seconds. If it stays `2`, read `runs/first.log` — a task file that fails to load, or a refused launch, says why there — fix that and launch again; otherwise the report's own message says what it could not read |
+
+Only one process may write to a run directory at a time: a second launch on a directory another is running is refused, also with exit `2`.
+
+### 5. Report back
+
+Tell the user, from the report:
+
+- **the best score** (`run: … best score …`). Node scores are canonical, larger-is-better: on a lower-is-better task it is the negated number, and the scorer's own value is in each node's diagnostics;
+- **the cost split** (the `cost split:` line): discovery-agent calls online against policy-development calls and replayed nodes offline. That ratio is the point of the method;
+- **whether the policy changed**: the `policy:` section says `unchanged` or shows the diff of the code the loop rewrote, and `selection:` says why;
+- **where the run directory is**. Running the same command again resumes it, and a larger `--cycles` asks for more.
+
+### What a run leaves
 
 A run writes one directory per cycle, each holding that cycle's tree, the policy it deployed, the policy it selected, and a record written last of all. The record is what says a cycle finished: running the same directory again resumes from the cycles it finds, so a crash in cycle 5 costs cycle 5 and not cycles 1–4. The report at the end prices each half of every cycle separately — discovery-agent calls online against model calls and revealed nodes offline — because the paper's claim is the ratio between them, not a single total.

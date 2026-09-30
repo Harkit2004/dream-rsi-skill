@@ -5,8 +5,9 @@ it links to — and the Python the agent will call, which is the ``dream_rsi`` p
 (``pip install``). Cloning the repo into the host's skills directory supplies the
 first by accident and drags in everything else: ``src/``, ``tests/``, the paper's PDF
 and ``.github/``, which the host project's own protected-path, format and lint gates
-then fail on. So this writes a *thin* directory instead: ``SKILL.md`` and
-``references/method.md``, the one file it links, and nothing else.
+then fail on. So this writes a *thin* directory instead: ``SKILL.md`` and the two files
+under ``references/`` that it points a host agent at — the method, and the template of
+the task file the agent writes (issue #75) — and nothing else.
 
     python -m dream_rsi.install --host {claude,opencode,cursor} [--project DIR] [--force]
 
@@ -53,7 +54,7 @@ __all__ = ["HOSTS", "SKILL_NAME", "InstallError", "install", "main"]
 SKILL_NAME = "dream-rsi"
 
 # What is installed, relative to the source and to the skill directory alike.
-_FILES = ("SKILL.md", "references/method.md")
+_FILES = ("SKILL.md", "references/method.md", "references/task_template.py")
 
 HOSTS = ("claude", "opencode", "cursor")
 
@@ -102,8 +103,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """The command: install, print where, and refuse in one line."""
     parser = argparse.ArgumentParser(
         prog="python -m dream_rsi.install",
-        description=f"Install the {SKILL_NAME} skill (SKILL.md and references/method.md) "
-        "for a coding-agent host, without cloning this repository into it.",
+        description=f"Install the {SKILL_NAME} skill (SKILL.md and the two files in "
+        "references/ it points at) for a coding-agent host, without cloning this "
+        "repository into it.",
     )
     parser.add_argument("--host", required=True, choices=HOSTS, help="the host to install for")
     parser.add_argument(

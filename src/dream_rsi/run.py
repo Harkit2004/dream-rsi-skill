@@ -84,7 +84,7 @@ from dream_rsi.orchestrator import (
     RolloutConfig,
     run_rollout,
 )
-from dream_rsi.pool import PoolConfig, PoolStats, SimulatorPool, subsample
+from dream_rsi.pool import PoolConfig, PoolError, PoolStats, SimulatorPool, subsample
 from dream_rsi.sandbox import (
     DEFAULT_LIMITS,
     SandboxedPolicy,
@@ -653,7 +653,11 @@ def run_cycles(
         )
         # After the manifest check, so a session that is refused leaves what the
         # last one asked for as it was (issue #73).
-        _write(directory / SESSION_FILENAME, json.dumps({"cycles": config.cycles}) + "\n")
+        session = directory / SESSION_FILENAME
+        # Staged and renamed, so a report never reads half a request.
+        staging = session.with_name(session.name + ".tmp")
+        _write(staging, json.dumps({"cycles": config.cycles}) + "\n")
+        durable.publish(staging, session)
 
         records, deployed, source = _resume(cycles, config.cycles, policy, pool)
         history = [record.world for record in records]
@@ -910,6 +914,8 @@ def _read(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RunError(f"a finished cycle is missing {path}: {exc}") from exc
+    except UnicodeError as exc:
+        raise RunError(f"{path} is not UTF-8 text: {exc}") from exc
 
 
 def _write(path: Path, text: str) -> None:
@@ -1007,11 +1013,27 @@ def _is_run_directory(directory: Path, *, held: bool) -> bool:
 
 
 def _requested(directory: Path) -> int | None:
-    """How many cycles the latest session was asked for, or ``None`` if nothing says."""
+    """How many cycles the latest session was asked for, or ``None`` if no session recorded it.
+
+    A record that is there but cannot be read is a :class:`RunError`: treating it as
+    absent would report a run that stopped short as finished.
+    """
+    path = directory / SESSION_FILENAME
     try:
-        return int(json.loads((directory / SESSION_FILENAME).read_text(encoding="utf-8"))["cycles"])
-    except (OSError, ValueError, TypeError, KeyError):
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         return None
+    except (OSError, UnicodeError) as exc:
+        raise RunError(f"{path} is not a readable session record: {exc}") from exc
+    try:
+        cycles = json.loads(text)["cycles"]
+    except (ValueError, TypeError, KeyError) as exc:
+        raise RunError(f"{path} is not a valid session record: {exc}") from exc
+    # ``bool`` is an ``int`` to Python and not a count to anyone: refused, with
+    # fractions and anything below one, rather than coerced into a cycle count.
+    if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
+        raise RunError(f"{path} is not a valid session record: cycles is {cycles!r}")
+    return cycles
 
 
 def _report(directory: Path) -> int:
@@ -1047,7 +1069,7 @@ def _report(directory: Path) -> int:
             run = Run.load(directory)
             requested = _requested(directory)
             held, pid = probe(directory)
-    except RunError as exc:
+    except (RunError, PoolError) as exc:
         print(exc, file=sys.stderr)
         return EXIT_REFUSED
     except OSError as exc:
