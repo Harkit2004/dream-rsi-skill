@@ -1,6 +1,16 @@
 ---
 name: dream-rsi
-description: Self-improving exploration for expensive search — record a discovery run as a tree of scored attempts, replay that frozen tree to score candidate exploration policies off-policy, rewrite the policy's Python from the replay feedback, and redeploy it (the Dream-RSI loop). Use when an automatic evaluator scores every candidate, one evaluation is expensive (compilation, benchmarking, long runs), and the same search will be run again — algorithm engineering, GPU kernel optimization, mathematical optimization, configuration or hyperparameter search — so that the search strategy itself improves across runs, not just the solutions it finds. Not for one-shot coding work: writing, debugging, reviewing or explaining a program, not for searching or grepping a codebase, and not for a search with no automatic scorer or no repeat runs, which leaves nothing for a replay simulator to be built from.
+description: >-
+  Self-improving exploration for expensive search — record a discovery run as a tree of scored
+  attempts, replay that frozen tree to score candidate exploration policies off-policy, rewrite
+  the policy's Python from the replay feedback, and redeploy it (the Dream-RSI loop). Use when an
+  automatic evaluator scores every candidate, one evaluation is expensive (compilation,
+  benchmarking, long runs), and the same search will be run again — algorithm engineering, GPU
+  kernel optimization, mathematical optimization, configuration or hyperparameter search — so that
+  the search strategy itself improves across runs, not just the solutions it finds. Not for
+  one-shot coding work: writing, debugging, reviewing or explaining a program, not for searching
+  or grepping a codebase, and not for a search with no automatic scorer or no repeat runs, which
+  leaves nothing for a replay simulator to be built from.
 ---
 
 # Dream-RSI
@@ -54,7 +64,3 @@ python -m dream_rsi.run --cycles 3 runs/loop   # the toy task, no model calls
 ```
 
 A run writes one directory per cycle, each holding that cycle's tree, the policy it deployed, the policy it selected, and a record written last of all. The record is what says a cycle finished: running the same directory again resumes from the cycles it finds, so a crash in cycle 5 costs cycle 5 and not cycles 1–4. The report at the end prices each half of every cycle separately — discovery-agent calls online against model calls and revealed nodes offline — because the paper's claim is the ratio between them, not a single total.
-
-## Working on this repo
-
-Read [AGENTS.md](AGENTS.md) before changing anything. Test first, minimal diff, and mark every place the paper is silent with `PAPER-GAP:`.

@@ -8,7 +8,7 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1", "ruff==0.16.8"]
+dev = ["pytest==9.1.1", "ruff==0.16.8", "pyyaml==6.0.3", "hatchling==1.32.4"]
 
 [build-system]
 requires = ["hatchling"]
@@ -16,6 +16,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dream_rsi"]
+
+# The skill ships in the wheel as package data, so `pip install git+https://...` and
+# `python -m dream_rsi.install` work without a clone. The root SKILL.md stays the one
+# source: this includes it at build time and keeps no second copy in the tree.
+[tool.hatch.build.targets.wheel.force-include]
+"SKILL.md" = "dream_rsi/skill/SKILL.md"
+"references/method.md" = "dream_rsi/skill/references/method.md"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

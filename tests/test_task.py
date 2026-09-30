@@ -40,7 +40,9 @@ class OptimalPolicy(GreedyBestFirstPolicy):
 BASE_SCORE = 1000.0
 
 
-def _task_file(directory: Path, *, problem: str = PROBLEM, name: str = "task.py") -> Path:
+def _task_file(
+    directory: Path, *, problem: str = PROBLEM, policy: str = POLICY, name: str = "task.py"
+) -> Path:
     """A task file with its own agent, evaluator and policy, and the toy's none of them."""
     path = directory / name
     path.write_text(
@@ -71,7 +73,7 @@ def _task_file(directory: Path, *, problem: str = PROBLEM, name: str = "task.py"
                     evaluator=Evaluator(),
                     developer=FakeDeveloper(),
                     problem={problem!r},
-                    policy={POLICY!r},
+                    policy={policy!r},
                 )
             """
         ),
@@ -134,7 +136,7 @@ def test_a_task_file_that_cannot_supply_a_task_stops_the_command_before_any_cycl
     code = _main(tmp_path, "--task", str(path))
 
     err = capsys.readouterr().err
-    assert code != 0
+    assert code == run.EXIT_REFUSED
     assert str(path) in err
     assert named in err
     assert "Traceback" not in err
@@ -149,13 +151,20 @@ def test_a_missing_task_file_is_named_and_stops_the_command(
     code = _main(tmp_path, "--task", str(missing))
 
     err = capsys.readouterr().err
-    assert code != 0
+    assert code == run.EXIT_REFUSED
     assert str(missing) in err
     assert not (tmp_path / "run").exists()
 
 
+@pytest.mark.parametrize(
+    ("change", "named"),
+    [
+        pytest.param({"problem": "maximise a different thing"}, "problem", id="problem"),
+        pytest.param({"policy": POLICY + "# a different start\n"}, "policy", id="policy"),
+    ],
+)
 def test_a_run_directory_is_not_resumed_under_a_different_task(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], change: dict[str, str], named: str
 ) -> None:
     """Issue #68's fourth: a history is one experiment or it is not (issue #45).
 
@@ -163,8 +172,8 @@ def test_a_run_directory_is_not_resumed_under_a_different_task(
     tells one task from another, so a second task file under the directory the
     first one ran in is refused, naming the field — and appends nothing.
     """
-    first = _task_file(tmp_path, problem="minimise the first thing", name="first.py")
-    second = _task_file(tmp_path, problem="maximise a different thing", name="second.py")
+    first = _task_file(tmp_path, name="first.py")
+    second = _task_file(tmp_path, name="second.py", **change)
     assert _main(tmp_path, "--task", str(first)) == 0
     capsys.readouterr()
     records = sorted((tmp_path / "run" / CYCLES_DIRNAME).rglob("cycle.json"))
@@ -173,8 +182,8 @@ def test_a_run_directory_is_not_resumed_under_a_different_task(
     code = run.main(["--cycles", "2", "--rounds", "2", "--task", str(second), str(tmp_path / "run")])
 
     err = capsys.readouterr().err
-    assert code != 0
-    assert "problem" in err
+    assert code == run.EXIT_REFUSED
+    assert named in err
     assert "Traceback" not in err
     after = [
         json.loads(path.read_text(encoding="utf-8"))
