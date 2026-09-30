@@ -154,7 +154,8 @@ python -m dream_rsi.install --host claude                        # the skill dir
 ```
 
 `--host` is `claude`, `opencode` or `cursor`. The command writes a thin skill directory —
-`SKILL.md` and `references/method.md`, the one file it links, and nothing else — to the
+`SKILL.md`, `references/method.md` and `references/task_template.py`, the files it links, and
+nothing else — to the
 host's **user-global** skills directory, and prints the path it wrote:
 
 | Host | user-global (default) | `--project DIR` |
