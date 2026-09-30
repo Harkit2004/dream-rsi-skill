@@ -15,7 +15,8 @@ called.
 * ``no-file``: exits 0 having written nothing.  ``empty``: writes an empty file.
   ``symlink``: makes the answer a symlink to ``--revision`` instead of a file.
 * ``unreadable``: writes the revision, then takes away every permission on it.
-  ``fifo``: makes the answer a named pipe nobody writes to. ``directory``: makes it a
+  ``fifo``: makes the answer a named pipe nobody writes to. ``fifo-held``: the same,
+  with a detached process holding it open for writing and writing nothing. ``directory``: makes it a
   directory.
 
 What it saw goes to a JSON file in ``$STAND_IN_LOG`` when that is set.
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -69,9 +71,16 @@ def main() -> int:
     if args.mode == "directory":
         output.mkdir()
         return 0
-    if args.mode == "fifo":
+    if args.mode in ("fifo", "fifo-held"):
         # Opening this for reading blocks until a writer appears, which nobody will be.
         os.mkfifo(output)
+        if args.mode == "fifo-held":
+            # Outlives the command's process group, the way a CLI's stray child can.
+            code = "import os, sys, time; os.open(sys.argv[1], os.O_RDWR); time.sleep(30)"
+            subprocess.Popen(
+                [sys.executable, "-c", code, str(output.resolve())], start_new_session=True
+            )
+            time.sleep(0.5)
         return 0
     if args.mode == "empty":
         output.write_text("", encoding="utf-8")

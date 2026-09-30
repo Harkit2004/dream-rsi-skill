@@ -333,8 +333,9 @@ def _within(seconds: int) -> Iterator[None]:
 @pytest.mark.parametrize(
     ("mode", "named"),
     [
-        pytest.param("fifo", "wrote no revised_policy.py", id="pipe"),
-        pytest.param("directory", "could not read revised_policy.py", id="directory"),
+        pytest.param("fifo", "not a regular file", id="pipe"),
+        pytest.param("fifo-held", "not a regular file", id="pipe-held-open"),
+        pytest.param("directory", "not a regular file", id="directory"),
     ],
 )
 def test_an_answer_that_is_not_a_file_is_refused_and_never_waited_on(

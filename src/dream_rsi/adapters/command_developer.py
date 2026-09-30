@@ -42,6 +42,7 @@ nothing to the command line beyond its instruction.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -185,20 +186,27 @@ class CommandDeveloper:
 def _read_revision(path: Path, limit: int) -> str:
     """What ``path`` holds, or ``""`` if it is not there.
 
-    Opened once, and the descriptor is what is read: a check on the *name* followed by
-    a read of the name leaves room for whatever the CLI left running to swap it in
-    between. A link is refused by the open itself, a pipe is opened without waiting for
-    a writer, and at most ``limit`` bytes are read, so a runaway file is refused without
-    being loaded. Anything the operating system will not do is a refusal, like any other
-    answer that cannot be used.
+    Opened once, and the descriptor is what is checked and read: a check on the *name*
+    followed by a read of the name leaves room for whatever the CLI left running to swap
+    it in between. A link is refused by the open itself, a pipe is opened without waiting
+    for a writer and then refused with anything else that is not a plain file, and at
+    most ``limit`` bytes are read, so a runaway file is refused without being loaded.
+    Anything the operating system will not do is a refusal, like any other answer that
+    cannot be used.
     """
     try:
-        with os.fdopen(os.open(path, _OPEN_FLAGS), "rb") as source:
-            data = source.read(limit + 1)
+        descriptor = os.open(path, _OPEN_FLAGS)
     except FileNotFoundError:
         return ""
     except OSError as exc:
         raise RevisionFailed(f"could not read {OUTPUT_FILENAME}: {exc.strerror or exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RevisionFailed(f"{OUTPUT_FILENAME} is not a regular file, so it was not read")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            data = source.read(limit + 1)
+    finally:
+        os.close(descriptor)
     if len(data) > limit:
         raise RevisionFailed(f"{OUTPUT_FILENAME} is larger than {limit} bytes, so it was not read")
     return data.decode("utf-8", errors="replace")
