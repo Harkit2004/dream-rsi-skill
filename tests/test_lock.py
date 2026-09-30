@@ -29,7 +29,9 @@ def test_a_second_run_on_a_held_directory_is_refused_before_it_touches_anything(
 ) -> None:
     directory = tmp_path / "run"
 
-    with holding(tmp_path, "--cycles", "1", str(directory)) as holder:
+    # One worker: with two, the second can still be setting up its workspace after the
+    # first has announced itself, and the directory would change under the comparison.
+    with holding(tmp_path, "--cycles", "1", "--workers", "1", str(directory)) as holder:
         before = contents(directory)
 
         second = cli("--cycles", "1", str(directory))

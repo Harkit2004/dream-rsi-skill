@@ -12,18 +12,23 @@ run actually leaves on disk, live or dead.
 
 from __future__ import annotations
 
+import os
 import signal
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from holder import cli, contents, holding
 
+from dream_rsi import run
 from dream_rsi.lock import LOCK_FILENAME
 from dream_rsi.run import (
+    CYCLES_DIRNAME,
     EXIT_FINISHED,
     EXIT_REFUSED,
     EXIT_RUNNING,
     EXIT_STOPPED,
+    MANIFEST_FILENAME,
     SESSION_FILENAME,
 )
 
@@ -56,9 +61,11 @@ def test_a_report_on_a_directory_another_process_holds_says_it_is_still_running(
 ) -> None:
     """Issue #73's second: the exit code says so, the report says which cycle, nothing changes."""
     directory = tmp_path / "run"
-    _run(directory, 1)
+    # One worker: with two, the second can still be setting up its workspace after the
+    # first has announced itself, and the directory would change under the comparison.
+    assert cli("--workers", "1", "--cycles", "1", str(directory)).returncode == 0
 
-    with holding(tmp_path, "--cycles", "2", str(directory)) as holder:
+    with holding(tmp_path, "--workers", "1", "--cycles", "2", str(directory)) as holder:
         before = contents(directory)
 
         reported = cli("--report", str(directory))
@@ -139,3 +146,72 @@ def test_a_report_on_something_that_is_not_a_run_directory_says_so_and_creates_n
     assert "not a run directory" in reported.stderr
     assert reported.stdout == ""
     assert contents(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ["stray-manifest", "empty-cycles"])
+def test_a_directory_that_only_shares_a_run_file_name_is_not_a_run_directory(
+    tmp_path: Path, kind: str
+) -> None:
+    """A ``manifest.json`` or a ``cycles/`` that no run wrote says nothing about a run."""
+    directory = tmp_path / kind
+    directory.mkdir()
+    if kind == "stray-manifest":
+        (directory / MANIFEST_FILENAME).write_text('{"name": "my-package"}\n', encoding="utf-8")
+    else:
+        (directory / CYCLES_DIRNAME).mkdir()
+    before = contents(tmp_path)
+
+    reported = cli("--report", str(directory))
+
+    assert reported.returncode == EXIT_REFUSED
+    assert "not a run directory" in reported.stderr
+    assert contents(tmp_path) == before
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason="root reads any file")
+def test_a_lock_the_report_cannot_read_is_a_refusal_and_not_a_finished_run(
+    tmp_path: Path,
+) -> None:
+    """Not knowing whether a process holds the run is not the same as knowing none does."""
+    directory = tmp_path / "run"
+    _run(directory, 1)
+    (directory / LOCK_FILENAME).chmod(0)
+
+    try:
+        reported = cli("--report", str(directory))
+    finally:
+        (directory / LOCK_FILENAME).chmod(0o644)
+
+    assert reported.returncode == EXIT_REFUSED
+    assert "status: finished" not in reported.stdout
+    assert "Traceback" not in reported.stderr
+
+
+def test_a_run_that_finishes_while_it_is_being_read_is_reported_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The last cycle lands, and the writer lets go, between reading the records and the lock.
+
+    The records read before the lock was seen free are a snapshot of a run still going;
+    once nothing holds it, they are read again, because now nothing can change them.
+    """
+    directory = tmp_path / "run"
+    _run(directory, 2)
+    real_load = run.Run.load
+    finished = {"yet": False}
+
+    def load(path: Path) -> run.Run:
+        loaded = real_load(path)
+        if not finished["yet"]:
+            # read before cycle 1 landed
+            loaded = replace(loaded, cycles=loaded.cycles[:1], policies=loaded.policies[:1])
+            finished["yet"] = True  # ... and the writer finished while it was being read
+        return loaded
+
+    monkeypatch.setattr(run.Run, "load", staticmethod(load))
+    monkeypatch.setattr(run, "probe", lambda path: (not finished["yet"], None))
+
+    code = run.main(["--report", str(directory)])
+
+    assert code == EXIT_FINISHED, capsys.readouterr().out
+    assert "status: finished (2 cycle(s))" in capsys.readouterr().out

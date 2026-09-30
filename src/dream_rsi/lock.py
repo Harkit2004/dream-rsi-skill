@@ -96,7 +96,9 @@ def probe(directory: str | Path) -> tuple[bool, int | None]:
 
     For a report on a run that must never be able to disturb it (issue #73). The lock
     file is opened read-only, and never created: a directory that has none is not
-    held. A shared lock is tried and dropped at once, which is a lock a running
+    held; one that cannot be opened for another reason raises :class:`OSError`, because
+    not knowing whether it is held is not knowing that it is free. A shared lock is
+    tried and dropped at once, which is a lock a running
     writer refuses and another prober does not.
 
     The one cost of asking: for the moment that shared lock is held, a run that is
@@ -108,7 +110,7 @@ def probe(directory: str | Path) -> tuple[bool, int | None]:
 
     try:
         descriptor = os.open(Path(directory) / LOCK_FILENAME, os.O_RDONLY)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return False, None
     try:
         try:
