@@ -11,8 +11,12 @@ The CLI is ``tests/stand_in_developer.py``. Nothing calls a model.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -245,6 +249,106 @@ def test_an_answer_that_is_a_symlink_to_somewhere_else_is_not_read_through(
 
     assert [version.name for version in report.versions] == ["v0"]
     assert "outside" in report.rejected[0].reason
+
+
+def test_an_answer_swapped_for_a_link_after_the_check_is_still_not_read_through(
+    tmp_path: Path, log: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checking a path and reading it are two steps, and the CLI may have left a process running.
+
+    Something detached from the command's process group survives cleanup and can put a
+    link where the file was in between. So the read itself must refuse a link, not
+    rely on the check having come first.
+    """
+    monkeypatch.setattr(
+        "dream_rsi.adapters.command_developer.is_inside", lambda root, path: True
+    )
+    secret = tmp_path / "secret.txt"
+    secret.write_text(REVISION, encoding="utf-8")  # legal source, so only the link is wrong
+    developer = _developer("--mode", "symlink", "--revision", str(secret))
+
+    report = _develop(developer, tmp_path, attempts=1)
+
+    assert [version.name for version in report.versions] == ["v0"]
+    assert "could not read" in report.rejected[0].reason
+
+
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: 1)() == 0, reason="root reads any file")
+def test_an_answer_the_harness_cannot_read_costs_the_revision_and_not_the_cycle(
+    tmp_path: Path, log: Path
+) -> None:
+    """A file with no read permission exists, so it is not "no file" — but it is no answer."""
+    revision = tmp_path / "revision.py"
+    revision.write_text(REVISION, encoding="utf-8")
+    developer = _developer("--mode", "unreadable", "--revision", str(revision))
+
+    report = _develop(developer, tmp_path, attempts=1)
+
+    assert [version.name for version in report.versions] == ["v0"]
+    assert "could not read" in report.rejected[0].reason
+    assert select(report.comparison).winner == "v0"
+
+
+def test_a_revision_over_the_output_limit_is_refused_and_one_at_it_is_not(
+    tmp_path: Path, log: Path
+) -> None:
+    """``max_output_bytes`` bounds what the command may write as well as what it prints.
+
+    The file is read into the harness's memory, and the CLI is not the harness's to trust
+    with how large it is.
+    """
+    revision = tmp_path / "revision.py"
+    revision.write_text(REVISION, encoding="utf-8")
+    size = revision.stat().st_size
+
+    at_limit = _develop(_developer("--revision", str(revision), max_output_bytes=size), tmp_path)
+    over = _develop(
+        _developer("--revision", str(revision), max_output_bytes=size - 1),
+        tmp_path,
+        attempts=1,
+    )
+
+    assert not at_limit.rejected
+    assert at_limit.versions[1].source == REVISION
+    assert [version.name for version in over.versions] == ["v0"]
+    assert f"larger than {size - 1} bytes" in over.rejected[0].reason
+
+
+@contextlib.contextmanager
+def _within(seconds: int) -> Iterator[None]:
+    """Fail, instead of hanging the suite, if the block is still running after ``seconds``."""
+
+    def _expired(signum: int, frame: object) -> None:
+        raise TimeoutError(f"still running after {seconds}s")
+
+    previous = signal.signal(signal.SIGALRM, _expired)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.parametrize(
+    ("mode", "named"),
+    [
+        pytest.param("fifo", "not a regular file", id="pipe"),
+        pytest.param("fifo-held", "not a regular file", id="pipe-held-open"),
+        pytest.param("directory", "not a regular file", id="directory"),
+    ],
+)
+def test_an_answer_that_is_not_a_file_is_refused_and_never_waited_on(
+    tmp_path: Path, log: Path, mode: str, named: str
+) -> None:
+    """Opening a pipe for reading waits for a writer; the harness must not."""
+    developer = _developer("--mode", mode)
+
+    with _within(60):
+        report = _develop(developer, tmp_path, attempts=1)
+
+    assert [version.name for version in report.versions] == ["v0"]
+    assert named in report.rejected[0].reason
 
 
 def test_a_command_is_an_argv_list_because_there_is_no_shell_to_split_a_string() -> None:

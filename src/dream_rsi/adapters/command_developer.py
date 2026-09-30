@@ -41,6 +41,8 @@ nothing to the command line beyond its instruction.
 
 from __future__ import annotations
 
+import os
+import stat
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -88,6 +90,15 @@ _DEFAULT_TIMEOUT = 1800.0
 
 _PROMPT_VIA = ("argument", "stdin")
 
+# How the answer is opened: never through a link, never waiting on a pipe, and as bytes
+# on every platform. Each of these is absent on some platforms, hence ``getattr``.
+_OPEN_FLAGS = (
+    os.O_RDONLY
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_NONBLOCK", 0)
+    | getattr(os, "O_BINARY", 0)
+)
+
 
 @dataclass(frozen=True)
 class CommandDeveloper:
@@ -95,7 +106,8 @@ class CommandDeveloper:
 
     ``command`` is an argv list, never a string, because there is no shell to split
     it. ``prompt_via`` says whether the instruction reaches it as the last argument
-    or on stdin.
+    or on stdin. ``max_output_bytes`` bounds what it may print and how large the
+    module it writes may be.
     """
 
     command: Sequence[str]
@@ -163,14 +175,41 @@ class CommandDeveloper:
                     f"{OUTPUT_FILENAME} resolves outside the scratch directory, so the "
                     "harness will not read through it"
                 )
-            revision = ""
-            if output.is_file():
-                revision = output.read_text(encoding="utf-8", errors="replace")
+            revision = _read_revision(output, self.max_output_bytes)
             if not revision.strip():
                 raise RevisionFailed(
                     _failure(f"the command wrote no {OUTPUT_FILENAME}", outcome.output)
                 )
             return revision
+
+
+def _read_revision(path: Path, limit: int) -> str:
+    """What ``path`` holds, or ``""`` if it is not there.
+
+    Opened once, and the descriptor is what is checked and read: a check on the *name*
+    followed by a read of the name leaves room for whatever the CLI left running to swap
+    it in between. A link is refused by the open itself, a pipe is opened without waiting
+    for a writer and then refused with anything else that is not a plain file, and at
+    most ``limit`` bytes are read, so a runaway file is refused without being loaded.
+    Anything the operating system will not do is a refusal, like any other answer that
+    cannot be used.
+    """
+    try:
+        descriptor = os.open(path, _OPEN_FLAGS)
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        raise RevisionFailed(f"could not read {OUTPUT_FILENAME}: {exc.strerror or exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise RevisionFailed(f"{OUTPUT_FILENAME} is not a regular file, so it was not read")
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            data = source.read(limit + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > limit:
+        raise RevisionFailed(f"{OUTPUT_FILENAME} is larger than {limit} bytes, so it was not read")
+    return data.decode("utf-8", errors="replace")
 
 
 def _failure(reason: str, output: str) -> str:

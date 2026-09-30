@@ -172,13 +172,17 @@ def _source() -> Path:
 
 
 def _holds(directory: Path, wanted: dict[str, bytes]) -> bool:
-    """Whether ``directory`` is exactly what installing would write: these files, no others."""
+    """Whether ``directory`` is exactly what installing would write: these files, no others.
+
+    A file that is a link does not count: it holds the right bytes only until the file it
+    points at changes, and the install is meant to stand on its own.
+    """
     if directory.is_symlink() or not directory.is_dir():
         return False
     present = {
         path.relative_to(directory).as_posix(): path
         for path in directory.rglob("*")
-        if path.is_file()
+        if path.is_file() and not path.is_symlink()
     }
     return set(present) == set(wanted) and all(
         present[name].read_bytes() == data for name, data in wanted.items()
