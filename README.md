@@ -67,6 +67,31 @@ under `policy:` is the loop working; the `cost split` line is what it cost.
 
 Running the same command again resumes: cycles with a record are read back, not redone.
 
+## Your own task
+
+`python -m dream_rsi.run --task PATH DIRECTORY` runs the same loop on a task of your own.
+`PATH` is a Python file that defines `task()` and returns a `dream_rsi.task.Task`:
+
+```python
+from dream_rsi.task import Task
+
+
+def task() -> Task:
+    return Task(
+        agent=...,      # writes candidates: anything with propose(context) -> Artifact
+        evaluator=...,  # scores them: a TaskEvaluator
+        developer=...,  # rewrites the exploration policy: anything with revise(context) -> str
+        problem="what is being optimised, and which way the score runs",
+        # policy=...    # optional: the starting policy's source (default: breadth-first)
+    )
+```
+
+The file is a Python file, not a config format, because each role is a protocol and you may
+need your own class for any of them. It is **your** code and runs in the command's own process;
+the exploration *policies* the loop writes are model-written and run only in the sandbox.
+A run directory is tied to its `problem` text and starting policy, so resuming it under a
+different task is refused. Without `--task` the command runs the toy task above, unchanged.
+
 ## Install as a skill
 
 Two commands leave a coding agent able to load `dream-rsi` by name. The skill (`SKILL.md`)
