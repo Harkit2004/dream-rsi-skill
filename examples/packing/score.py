@@ -22,11 +22,13 @@ import json
 import math
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 POINTS = 10
 TIMEOUT_SECONDS = 30
-# The most of a candidate's output this reads: ten points is a few hundred bytes.
+# The most a candidate may print, on stdout or stderr: ten points is a few hundred bytes.
 OUTPUT_LIMIT = 1_000_000
 
 
@@ -64,21 +66,40 @@ def parse(output: str) -> list[tuple[float, float]]:
 
 
 def evaluate(program: Path, timeout: float = TIMEOUT_SECONDS) -> float:
-    """Run ``program`` and score what it prints, or raise ``ValueError`` saying why not."""
-    try:
-        completed = subprocess.run(
-            [sys.executable, str(program)],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        raise ValueError(f"solution.py timed out after {timeout:g}s") from None
-    if completed.returncode != 0:
-        tail = completed.stderr.strip()[-500:]
-        raise ValueError(f"solution.py exited with status {completed.returncode}: {tail}")
-    return min_distance(parse(completed.stdout[:OUTPUT_LIMIT]))
+    """Run ``program`` and score what it prints, or raise ``ValueError`` saying why not.
+
+    Its output goes to files rather than pipes, and is measured while it runs: a candidate
+    that prints without end is stopped once it passes ``OUTPUT_LIMIT``, instead of being
+    held in memory until the timeout.
+    """
+    with tempfile.TemporaryDirectory(prefix="packing-score-") as scratch:
+        out_path, err_path = Path(scratch) / "stdout", Path(scratch) / "stderr"
+        with out_path.open("wb") as out, err_path.open("wb") as err:
+            process = subprocess.Popen([sys.executable, str(program)], stdout=out, stderr=err)
+            try:
+                deadline = time.monotonic() + timeout
+                while process.poll() is None:
+                    if _too_much(out_path, err_path):
+                        raise ValueError(f"solution.py printed more than {OUTPUT_LIMIT} bytes")
+                    if time.monotonic() > deadline:
+                        raise ValueError(f"solution.py timed out after {timeout:g}s")
+                    time.sleep(0.02)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+        if _too_much(out_path, err_path):
+            raise ValueError(f"solution.py printed more than {OUTPUT_LIMIT} bytes")
+        stdout = out_path.read_text(encoding="utf-8", errors="replace")
+        stderr = err_path.read_text(encoding="utf-8", errors="replace")
+    if process.returncode != 0:
+        tail = stderr.strip()[-500:]
+        raise ValueError(f"solution.py exited with status {process.returncode}: {tail}")
+    return min_distance(parse(stdout))
+
+
+def _too_much(*paths: Path) -> bool:
+    return any(path.stat().st_size > OUTPUT_LIMIT for path in paths)
 
 
 def main(argv: list[str] | None = None) -> int:

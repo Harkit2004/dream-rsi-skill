@@ -90,6 +90,13 @@ def test_the_scorer_ranks_known_answers_in_the_stated_direction(tmp_path: Path) 
         pytest.param("print('not json')\n", "JSON", id="not-json"),
         pytest.param("raise SystemExit(3)\n", "exited with status 3", id="crashes"),
         pytest.param("import time\ntime.sleep(120)\n", "timed out", id="hangs"),
+        # Stopped when the output passes the limit, not held in memory until the timeout.
+        pytest.param("while True:\n    print('x' * 65536)\n", "more than", id="floods-stdout"),
+        pytest.param(
+            "import sys\nwhile True:\n    sys.stderr.write('x' * 65536)\n",
+            "more than",
+            id="floods-stderr",
+        ),
         pytest.param(_program([[0.5, "x"]] * 10), "numbers", id="not-numbers"),
     ],
 )
