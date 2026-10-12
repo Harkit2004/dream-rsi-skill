@@ -167,7 +167,9 @@ def test_a_result_left_by_an_earlier_attempt_is_not_read_as_this_ones(tmp_path: 
             # A child that keeps the command's output open for as long as it lives:
             # a scorer that waited on a pipe would still be waiting when the timeout
             # had long passed.
-            'child = subprocess.Popen(["sleep", "120"])\n'
+            # Not ``sleep``: a plain Windows has no such program.
+            "child = subprocess.Popen("
+            '[sys.executable, "-c", "import time; time.sleep(120)"])\n'
             'Path("child.pid").write_text(str(child.pid))\n'
             "time.sleep(120)",
             id="leaves-a-child-behind",
@@ -199,12 +201,34 @@ def _is_gone(pid: int, *, patience: float = 10.0) -> bool:
     """Whether ``pid`` stops existing, allowing for it to be reaped after the kill."""
     deadline = time.monotonic() + patience
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _is_running(pid):
             return True
         time.sleep(0.05)
     return False
+
+
+def _is_running(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    # ``os.kill(pid, 0)`` is no question on Windows: it ends the process, with status 0.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    status = wintypes.DWORD()
+    kernel32.GetExitCodeProcess(handle, ctypes.byref(status))
+    kernel32.CloseHandle(handle)
+    return status.value == 259  # STILL_ACTIVE
 
 
 @pytest.mark.parametrize(
@@ -408,3 +432,53 @@ def test_a_rollout_scores_every_node_with_the_command(tmp_path: Path) -> None:
     for node in attempts:
         assert node.artifact is not None
         assert node.score == len(node.artifact.splitlines()) / 4
+
+
+# What npm writes beside a CLI it installs on Windows, and what `opencode` or `npm`
+# on a Windows PATH actually is: a batch file whose last line starts the real program.
+NPM_SHIM = '@ECHO off\r\nSETLOCAL\r\nSET dp0=%~dp0\r\n"{program}"  "%dp0%\\cli.py" %*\r\n'
+
+# Everything `cmd.exe` would act on if it ever saw the argument.
+HOSTILE = 'a "quoted" word & echo INJECTED > injected.txt | more %PATH% ^ line one\nline two'
+
+
+@pytest.mark.skipif(os.name != "nt", reason="batch shims are how Windows installs a CLI")
+def test_a_cli_installed_as_a_batch_shim_runs_by_its_bare_name_and_no_shell_reads_its_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #92: `opencode run` has to work as typed, and "no shell" has to stay true."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "mytool.cmd").write_text(NPM_SHIM.format(program=sys.executable), encoding="utf-8")
+    (bin_dir / "cli.py").write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        'Path("eval/score.json").write_text(json.dumps('
+        '{"score": 1, "correct": True, "diagnostics": sys.argv[1]}))\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    workspace = _workspace(tmp_path)
+
+    result = CommandEvaluator(["mytool", HOSTILE], HIGHER, timeout=QUICK).evaluate("c\n", workspace)
+
+    assert result.score == 1, result.error
+    assert HOSTILE in result.diagnostics
+    assert not (workspace / "injected.txt").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="batch shims are how Windows installs a CLI")
+def test_a_batch_file_that_is_not_a_shim_is_refused_rather_than_run_through_a_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "mytool.cmd").write_text("@ECHO off\r\necho ran > ran.txt\r\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
+    workspace = _workspace(tmp_path)
+
+    result = CommandEvaluator(["mytool"], HIGHER, timeout=QUICK).evaluate("c\n", workspace)
+
+    assert not result.evaluated
+    assert result.error is not None and "mytool.cmd" in result.error.lower()
+    assert not (workspace / "ran.txt").exists()

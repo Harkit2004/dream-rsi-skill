@@ -19,14 +19,19 @@ worth getting right once:
 * **No shell.** The command is an argv list, so nothing the candidate, the prompt
   or the workspace contains is ever interpreted as one.
 
-POSIX, like the sandbox (:mod:`dream_rsi.sandbox`): a process group and
-``SIGKILL`` are looked up when a command is run, so importing this on another
-platform still works and the loop refuses to start there by name (issue #67).
+"Its own process group" is POSIX. Windows has no group a kill reaches, so there
+the command is put in a *job object* — the kernel's handle on a process and
+everything it goes on to start — and the job is terminated instead (issue #92).
+The command is created suspended and released only once it is in the job, so
+there is no moment in which it could start a child the job does not hold.
 """
 
 from __future__ import annotations
 
+import errno
 import os
+import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -34,7 +39,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 __all__ = [
     "DEFAULT_MAX_OUTPUT_BYTES",
@@ -105,14 +110,15 @@ def run_command(
             feed.flush()
             feed.seek(0)
         process = subprocess.Popen(
-            list(argv),
+            _resolved(list(argv), env),
             cwd=cwd,
             env=None if env is None else dict(env),
             stdin=subprocess.DEVNULL if stdin is None else feed,
             stdout=sink,
             stderr=subprocess.STDOUT,
-            start_new_session=True,
+            **_GROUPED,
         )
+        job = _hold(process)
         status: int | None = None
         exceeded = False
         started = time.monotonic()
@@ -129,7 +135,7 @@ def run_command(
             # Also on an interrupt: a command outliving the loop that started it is
             # the failure this guards against, and the group is the only handle on
             # everything it started.
-            _kill_group(process)
+            _kill_group(process, job)
         # Measured once more now it is over: a command that floods and exits between
         # two polls must not get through on winning a race.
         exceeded = exceeded or os.fstat(sink.fileno()).st_size > max_output_bytes
@@ -160,17 +166,160 @@ def tail_of_file(path: str | Path) -> str:
         return _tail(handle)
 
 
-def _kill_group(process: subprocess.Popen[bytes]) -> None:
+# The line of a batch shim that starts the real program: quoted words, then ``%*``
+# for the caller's arguments. It is what npm's cmd-shim writes, in both its forms:
+# ``"%dp0%\...\tool.exe" %*`` and ``"%_prog%" "%dp0%\...\cli.js" %*``.
+_SHIM_LINE = re.compile(r'((?:"[^"\r\n]*"\s+)+)%\*\s*$')
+
+
+def _resolved(argv: list[str], env: Mapping[str, str] | None) -> list[str]:
+    """``argv`` with its program found the way a Windows user's shell would find it.
+
+    On POSIX, ``argv`` unchanged. On Windows a coding-agent CLI installed by npm is
+    not a program but a batch file beside one (``opencode.cmd``), which Windows only
+    runs by handing the whole command line to ``cmd.exe`` — a shell, which would
+    then read the prompt as commands. So the shim is read instead of run: the
+    program it names is started directly, with the arguments untouched, and a
+    command the user typed as ``opencode run`` works as typed (issue #92). A batch
+    file that is not such a shim is refused, since running it means a shell.
+    """
+    if os.name != "nt" or not argv:
+        return argv
+    found = shutil.which(argv[0], path=None if env is None else env.get("PATH"))
+    if found is None or not found.lower().endswith((".cmd", ".bat")):
+        # Not found is left for ``Popen`` to report, as it is on POSIX.
+        return argv if found is None else [found, *argv[1:]]
+    shim = Path(found)
+    text = shim.read_text(encoding="utf-8", errors="replace")
+    lines = [line for line in text.splitlines() if line.strip()]
+    match = _SHIM_LINE.search(lines[-1].strip()) if lines else None
+    here = str(shim.parent)
+    words = [
+        word.replace("%dp0%", here).replace("%~dp0", here)
+        for word in re.findall(r'"([^"]*)"', match.group(1) if match else "")
+    ]
+    if words and words[0] == "%_prog%":
+        # npm's own rule for a script shim: the node beside the shim, else the one
+        # on the path.
+        beside = shim.parent / "node.exe"
+        words[0] = str(beside) if beside.exists() else "node"
+    # A variable still standing is one only the batch file's own logic could fill in.
+    if not words or any("%" in word for word in words):
+        raise OSError(
+            errno.ENOEXEC,
+            f"{shim} is a batch file, which only a shell can run, and it is not a "
+            "shim this can read the program out of: name the program it starts instead",
+        )
+    return [*words, *argv[1:]]
+
+
+# What makes a command something that can be ended as a whole. On POSIX, a session
+# of its own, so its pid is a group id. On Windows, ``CREATE_SUSPENDED``: nothing
+# of it runs until :func:`_hold` has put it in a job.
+_GROUPED: dict[str, Any] = (
+    {"creationflags": 0x00000004} if os.name == "nt" else {"start_new_session": True}
+)
+
+_JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+
+def _hold(process: subprocess.Popen[bytes]) -> int | None:
+    """On Windows, put the suspended ``process`` in a job of its own and let it run.
+
+    Returns the job's handle, which is what :func:`_kill_group` ends; ``None`` on
+    POSIX, where the process group made by ``start_new_session`` is the handle. The
+    job also kills what it holds when its last handle closes, so a harness that dies
+    without reaching :func:`_kill_group` still leaves nothing running.
+    """
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _BasicLimits(ctypes.Structure):
+        _fields_ = (
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        )
+
+    class _ExtendedLimits(ctypes.Structure):
+        _fields_ = (
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", ctypes.c_uint64 * 6),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        )
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    kernel32.SetInformationJobObject.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    )
+    kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    # The one call here that is not in kernel32: ``Popen`` keeps the process handle
+    # and drops the thread handle ``ResumeThread`` would need.
+    resume = ctypes.WinDLL("ntdll").NtResumeProcess
+    resume.argtypes = (wintypes.HANDLE,)
+
+    handle = int(process._handle)  # type: ignore[attr-defined]
+    job = kernel32.CreateJobObjectW(None, None)
+    limits = _ExtendedLimits()
+    limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    held = (
+        job
+        and kernel32.SetInformationJobObject(
+            job, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), ctypes.sizeof(limits)
+        )
+        and kernel32.AssignProcessToJobObject(job, handle)
+    )
+    if not held:
+        # Never released, so nothing of it ran: end it rather than run it loose.
+        error = ctypes.get_last_error()
+        process.kill()
+        process.wait()
+        if job:
+            kernel32.CloseHandle(job)
+        raise OSError(error, f"could not put the command in a job object: {ctypes.FormatError(error)}")
+    resume(handle)
+    return int(job)
+
+
+def _kill_group(process: subprocess.Popen[bytes], job: int | None) -> None:
     """End everything ``process`` started, and reap ``process`` itself.
 
     Whether or not the command itself is still running: one that exited cleanly can
     have left a child behind, and a process nothing is waiting for is a leak. A
     group with nothing left in it is not an error.
     """
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+    if job is None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    else:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.TerminateJobObject(job, 1)
+        kernel32.CloseHandle(job)
     process.wait()
 
 
