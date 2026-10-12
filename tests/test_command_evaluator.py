@@ -167,7 +167,9 @@ def test_a_result_left_by_an_earlier_attempt_is_not_read_as_this_ones(tmp_path: 
             # A child that keeps the command's output open for as long as it lives:
             # a scorer that waited on a pipe would still be waiting when the timeout
             # had long passed.
-            'child = subprocess.Popen(["sleep", "120"])\n'
+            # Not ``sleep``: a plain Windows has no such program.
+            "child = subprocess.Popen("
+            '[sys.executable, "-c", "import time; time.sleep(120)"])\n'
             'Path("child.pid").write_text(str(child.pid))\n'
             "time.sleep(120)",
             id="leaves-a-child-behind",
@@ -199,12 +201,34 @@ def _is_gone(pid: int, *, patience: float = 10.0) -> bool:
     """Whether ``pid`` stops existing, allowing for it to be reaped after the kill."""
     deadline = time.monotonic() + patience
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _is_running(pid):
             return True
         time.sleep(0.05)
     return False
+
+
+def _is_running(pid: int) -> bool:
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+    # ``os.kill(pid, 0)`` is no question on Windows: it ends the process, with status 0.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    status = wintypes.DWORD()
+    kernel32.GetExitCodeProcess(handle, ctypes.byref(status))
+    kernel32.CloseHandle(handle)
+    return status.value == 259  # STILL_ACTIVE
 
 
 @pytest.mark.parametrize(
