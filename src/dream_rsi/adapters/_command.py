@@ -28,7 +28,10 @@ there is no moment in which it could start a child the job does not hold.
 
 from __future__ import annotations
 
+import errno
 import os
+import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -107,7 +110,7 @@ def run_command(
             feed.flush()
             feed.seek(0)
         process = subprocess.Popen(
-            list(argv),
+            _resolved(list(argv), env),
             cwd=cwd,
             env=None if env is None else dict(env),
             stdin=subprocess.DEVNULL if stdin is None else feed,
@@ -161,6 +164,53 @@ def tail_of_file(path: str | Path) -> str:
     """The last :data:`TAIL_BYTES` of the file at ``path``, without reading the rest."""
     with Path(path).open("rb") as handle:
         return _tail(handle)
+
+
+# The line of a batch shim that starts the real program: quoted words, then ``%*``
+# for the caller's arguments. It is what npm's cmd-shim writes, in both its forms:
+# ``"%dp0%\...\tool.exe" %*`` and ``"%_prog%" "%dp0%\...\cli.js" %*``.
+_SHIM_LINE = re.compile(r'((?:"[^"\r\n]*"\s+)+)%\*\s*$')
+
+
+def _resolved(argv: list[str], env: Mapping[str, str] | None) -> list[str]:
+    """``argv`` with its program found the way a Windows user's shell would find it.
+
+    On POSIX, ``argv`` unchanged. On Windows a coding-agent CLI installed by npm is
+    not a program but a batch file beside one (``opencode.cmd``), which Windows only
+    runs by handing the whole command line to ``cmd.exe`` — a shell, which would
+    then read the prompt as commands. So the shim is read instead of run: the
+    program it names is started directly, with the arguments untouched, and a
+    command the user typed as ``opencode run`` works as typed (issue #92). A batch
+    file that is not such a shim is refused, since running it means a shell.
+    """
+    if os.name != "nt" or not argv:
+        return argv
+    found = shutil.which(argv[0], path=None if env is None else env.get("PATH"))
+    if found is None or not found.lower().endswith((".cmd", ".bat")):
+        # Not found is left for ``Popen`` to report, as it is on POSIX.
+        return argv if found is None else [found, *argv[1:]]
+    shim = Path(found)
+    text = shim.read_text(encoding="utf-8", errors="replace")
+    lines = [line for line in text.splitlines() if line.strip()]
+    match = _SHIM_LINE.search(lines[-1].strip()) if lines else None
+    here = str(shim.parent)
+    words = [
+        word.replace("%dp0%", here).replace("%~dp0", here)
+        for word in re.findall(r'"([^"]*)"', match.group(1) if match else "")
+    ]
+    if words and words[0] == "%_prog%":
+        # npm's own rule for a script shim: the node beside the shim, else the one
+        # on the path.
+        beside = shim.parent / "node.exe"
+        words[0] = str(beside) if beside.exists() else "node"
+    # A variable still standing is one only the batch file's own logic could fill in.
+    if not words or any("%" in word for word in words):
+        raise OSError(
+            errno.ENOEXEC,
+            f"{shim} is a batch file, which only a shell can run, and it is not a "
+            "shim this can read the program out of: name the program it starts instead",
+        )
+    return [*words, *argv[1:]]
 
 
 # What makes a command something that can be ended as a whole. On POSIX, a session
