@@ -20,9 +20,13 @@ written into the file so a refusal can say who to look at. It is for that
 message only: the lock's correctness never reads it, so a stale or missing pid
 costs a less helpful sentence and never a wrong decision.
 
-``flock`` is POSIX, like the sandbox (:mod:`dream_rsi.sandbox`), and a platform
-without one is refused earlier and by name (issue #67). ``fcntl`` is therefore
-imported where it is used, so the package still imports elsewhere.
+``flock`` is POSIX, so ``fcntl`` is imported where it is used and the package still
+imports elsewhere (issue #67). Windows has the same thing under another name
+(issue #91): ``msvcrt.locking`` takes a lock the OS also drops when its holder
+exits by any route. Two differences are handled in :func:`_try_lock`. A Windows
+lock is *mandatory* — it stops other processes reading the bytes it covers — so it
+is taken on one byte far past the pid, which a refusal still has to read. And
+there is no shared kind, so a probe takes the exclusive one and drops it at once.
 """
 
 from __future__ import annotations
@@ -34,6 +38,11 @@ from types import TracebackType
 __all__ = ["LOCK_FILENAME", "RunInUseError", "RunLock", "probe"]
 
 LOCK_FILENAME = "run.lock"
+
+# Where the Windows lock sits in the lock file: past anything a pid could occupy.
+# A lock may cover bytes beyond the end of a file, so the file stays as short as
+# the pid written into it.
+_WINDOWS_LOCK_OFFSET = 1 << 30
 
 
 class RunInUseError(RuntimeError):
@@ -55,26 +64,25 @@ class RunLock:
     # ``Self`` would be the annotation, and it needs Python 3.11 while this package
     # supports 3.10 (as ``sandbox.SandboxedPolicy.__enter__`` says of itself).
     def __enter__(self) -> RunLock:  # noqa: PYI034
-        import fcntl
-
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # No ``O_TRUNC``: opening a held lock file must not change it, or refusing a
         # second process would have already written to the directory.
         descriptor = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+            locked = _try_lock(descriptor, shared=False)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        if not locked:
             holder = _holder(descriptor)
             os.close(descriptor)
             raise RunInUseError(
                 f"{self._path.parent} is in use by another run{holder}: "
                 "wait for it to finish, or read its progress without starting a cycle"
-            ) from None
-        except BaseException:
-            os.close(descriptor)
-            raise
+            )
         # Ours now, so this is the one process allowed to write it.
         os.ftruncate(descriptor, 0)
+        os.lseek(descriptor, 0, os.SEEK_SET)
         os.write(descriptor, f"{os.getpid()}\n".encode("ascii"))
         self._descriptor = descriptor
         return self
@@ -106,20 +114,46 @@ def probe(directory: str | Path) -> tuple[bool, int | None]:
     a run refused is a run not started — and the window is microseconds, which is
     what a probe that never writes costs.
     """
-    import fcntl
-
     try:
         descriptor = os.open(Path(directory) / LOCK_FILENAME, os.O_RDONLY)
     except (FileNotFoundError, NotADirectoryError):
         return False, None
     try:
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
+        if not _try_lock(descriptor, shared=True):
             return True, _pid(descriptor)
         return False, None
     finally:
         os.close(descriptor)
+
+
+def _try_lock(descriptor: int, *, shared: bool) -> bool:
+    """Take the lock without waiting, and say whether it was free.
+
+    ``shared`` is a probe's lock: one a writer refuses and another prober does not,
+    held until the descriptor is closed. Windows has no shared kind, so a probe
+    there takes the exclusive lock and gives it straight back, and two probes at
+    the same instant can each see the other as a holder — the same closed failure,
+    for the same microseconds, as a probe meeting a run that is starting.
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(descriptor, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        if shared:
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        return True
+
+    import fcntl
+
+    try:
+        fcntl.flock(descriptor, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
 
 
 def _pid(descriptor: int) -> int | None:
@@ -129,7 +163,9 @@ def _pid(descriptor: int) -> int | None:
     the ``flock`` was about, and reading it changes nothing.
     """
     try:
-        text = os.pread(descriptor, 32, 0).decode("ascii", errors="replace").strip()
+        # Not ``os.pread``, which Windows does not have.
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        text = os.read(descriptor, 32).decode("ascii", errors="replace").strip()
     except OSError:
         return None
     return int(text) if text.isdigit() else None
