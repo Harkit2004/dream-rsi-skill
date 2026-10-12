@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from holder import cli, contents, holding
 
-from dream_rsi.lock import RunInUseError, RunLock
+from dream_rsi.lock import RunInUseError, RunLock, probe
 
 
 def test_a_second_run_on_a_held_directory_is_refused_before_it_touches_anything(
@@ -70,6 +70,48 @@ def test_a_lock_is_released_when_its_holder_lets_go(tmp_path: Path) -> None:
         pass
 
     # Released by leaving the block, whether or not it was left by an exception.
+    with RunLock(tmp_path):
+        pass
+
+
+# A process that takes the lock itself, for what must hold on a platform where the
+# real run above cannot start yet: Windows has a lock (issue #91) before it has a
+# sandbox. It says "held" once it holds, then waits to be killed.
+LOCKS_AND_WAITS = (
+    "import sys, time; from dream_rsi.lock import RunLock\n"
+    "with RunLock(sys.argv[1]):\n"
+    "    print('held', flush=True)\n"
+    "    time.sleep(3600)\n"
+)
+
+
+def test_another_processs_lock_is_refused_by_pid_and_is_gone_when_it_is_killed(
+    tmp_path: Path,
+) -> None:
+    holder = subprocess.Popen(
+        [sys.executable, "-c", LOCKS_AND_WAITS, str(tmp_path)],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "held"
+        before = (tmp_path / "run.lock").read_bytes()
+
+        # The pid has to be legible from outside while the lock is held: where a
+        # lock is mandatory, one taken over the pid's own bytes would hide it.
+        with pytest.raises(RunInUseError, match=f"pid {holder.pid}"), RunLock(tmp_path):
+            pass
+        assert probe(tmp_path) == (True, holder.pid)
+        assert (tmp_path / "run.lock").read_bytes() == before
+    finally:
+        # No signal by name: ``SIGKILL`` is not one Windows has.
+        holder.kill()
+        holder.wait()
+        assert holder.stdout is not None
+        holder.stdout.close()
+
+    assert probe(tmp_path) == (False, None)
     with RunLock(tmp_path):
         pass
 
