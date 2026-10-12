@@ -18,24 +18,45 @@ built from the paper.
 
 ## What it is for
 
-Use it when **all three** are true of the task:
+**In one sentence:** when finding a good answer means trying many candidates, and each try is
+slow or costly, this skill learns from the tries already made which ones are worth making, so
+the next search wastes fewer.
 
-1. **A scorer already exists.** A command gives every candidate a number: a benchmark, a test
-   harness, a checker.
-2. **One evaluation is expensive.** Compiling, benchmarking, a long run. That is what makes
-   choosing the next candidate well worth anything.
-3. **The search will be run again.** The improved policy needs a next run to be deployed into.
+**A picture.** You are perfecting a cake recipe, and every test bake takes an hour. After a few
+weekends you have a notebook of everything you tried and how it turned out. Between weekends
+you re-read the notebook and work out a smarter order to try things in: stop early when a line
+of changes has gone flat, try several variations at once when it is promising. Reading the
+notebook costs nothing; only baking costs. Dream-RSI is that habit for an AI coding agent: the
+notebook is a recorded tree of attempts, and re-reading it is the "dreaming".
 
-| Fits | Does not fit |
-|---|---|
-| Making code faster against a benchmark: algorithm engineering, GPU kernel tuning | Writing a feature, fixing a bug, reviewing a diff, explaining code |
-| Mathematical optimization with a checker: packings, constructions, bounds | A design decision or a spike: there is nothing to score |
-| Configuration, compiler-flag or hyperparameter search | A search you will run exactly once |
-| Any other search with the three properties above | A task whose scorer you would have to invent to use this |
+**Does my task fit?** Ask three questions. You need a yes to all three.
 
-The last row is the common mistake. If no scorer exists yet, the loop has nothing real to
-measure, and a scorer made up for the occasion is usually solved on the first attempt, which
-leaves nothing to search.
+1. **Can a program grade an answer by itself, with a number?** A speed test, a count of tests
+   passed, an error rate, a checker for a maths problem. If a person has to look and judge,
+   the answer is no.
+2. **Is each grading slow or costly?** It takes minutes, compute or money, or the attempt
+   itself does (a model has to write it). If you could try a million answers in a second, you
+   do not need this.
+3. **Will you do this kind of search again?** What the skill improves is *how* it searches,
+   and that only pays off the next time.
+
+| You would say | Fits? | Why |
+|---|---|---|
+| "Make this function as fast as possible; here is the benchmark." | Yes | A number, a slow test, and you will keep optimizing |
+| "Find the best settings for this compiler / model / pipeline." | Yes | Each setting is a candidate and each trial is costly |
+| "Find the best arrangement": a packing, a schedule, a layout, with a checker | Yes | The checker is the grader |
+| "Build me a login page." / "Fix this bug." | No | One job, done once: nothing to search |
+| "Review this code." / "Which database should we use?" | No | No program can grade the answer |
+| "Tune this once and never again." | No | There is no next search to do better in |
+| "I have no grader, but I could make one up." | No | See below |
+
+That last row is the common mistake. A grader invented just so the skill can be used is
+usually easy to satisfy on the first attempt, and then there is nothing left to search. Start
+from a measurement you already trust.
+
+In the method's own words, the three questions are: an automatic evaluator exists, one
+evaluation is expensive, and the search will be run again. The fields the paper works in are
+algorithm engineering, GPU kernel optimization and mathematical optimization.
 
 ## Install
 
